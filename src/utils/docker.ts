@@ -79,14 +79,27 @@ export async function executeDockerCommand(command: string): Promise<{ stdout: s
   }
 }
 
+export interface ClusterCreationProgress {
+  stage: string;
+  message: string;
+  nodeNumber?: number;
+  totalNodes?: number;
+}
+
+export type ProgressCallback = (progress: ClusterCreationProgress) => void;
+
 export async function createYugabyteCluster(
   name: string,
   nodes: number,
   version: string,
   masterGFlags?: string,
-  tserverGFlags?: string
+  tserverGFlags?: string,
+  onProgress?: ProgressCallback
 ): Promise<void> {
   // Clean up any existing containers with the same name pattern (from previous failed attempts)
+  if (onProgress) {
+    onProgress({ stage: "cleanup", message: "Cleaning up existing containers..." });
+  }
   console.log(`[Docker] Cleaning up any existing containers for cluster ${name}...`);
   for (let i = 0; i < nodes; i++) {
     const nodeName = `yb-${name}-node${i + 1}`;
@@ -100,17 +113,29 @@ export async function createYugabyteCluster(
   // Network will be created in createYugabytedClusterWithHostNetwork
 
   // Check if image exists locally, if not, try to pull it
+  if (onProgress) {
+    onProgress({ stage: "image", message: `Checking for YugabyteDB image (${version})...` });
+  }
   console.log(`[Docker] Checking for yugabytedb/yugabyte:${version} image...`);
   try {
     // First check if image exists locally
     try {
       await executeDockerCommand(`docker image inspect yugabytedb/yugabyte:${version} 2>/dev/null`);
       console.log(`[Docker] Image found locally`);
+      if (onProgress) {
+        onProgress({ stage: "image", message: `Image found locally` });
+      }
     } catch (inspectError) {
       // Image doesn't exist locally, try to pull it
+      if (onProgress) {
+        onProgress({ stage: "image", message: `Pulling YugabyteDB image (${version})...` });
+      }
       console.log(`[Docker] Image not found locally, pulling from registry...`);
       try {
         await executeDockerCommand(`docker pull yugabytedb/yugabyte:${version}`);
+        if (onProgress) {
+          onProgress({ stage: "image", message: `Image pulled successfully` });
+        }
         console.log(`[Docker] Successfully pulled image`);
       } catch (pullError: any) {
         const errorMsg = pullError.stderr || pullError.message || "Unknown error";
@@ -161,13 +186,16 @@ export async function createYugabyteCluster(
   }
 
   // Use yugabyted for all clusters with host networking for better connectivity
+  if (onProgress) {
+    onProgress({ stage: "network", message: "Creating Docker network..." });
+  }
   console.log(`[Docker] Using yugabyted with host networking for ${nodes}-node cluster`);
   
   const createdContainers: string[] = [];
   
   try {
     // Always use yugabyted with custom bridge network
-    await createYugabytedClusterWithHostNetwork(name, nodes, version, createdContainers, masterGFlags, tserverGFlags);
+    await createYugabytedClusterWithHostNetwork(name, nodes, version, createdContainers, masterGFlags, tserverGFlags, onProgress);
   } catch (error: any) {
     // Rollback: clean up any containers we created
     console.error(`[Docker] Error creating cluster, cleaning up created containers...`);
@@ -189,9 +217,15 @@ export async function createYugabyteCluster(
   }
   
   // Wait a bit for containers to start and form cluster
+  if (onProgress) {
+    onProgress({ stage: "finalize", message: "Finalizing cluster formation..." });
+  }
   await new Promise((resolve) => setTimeout(resolve, 5000));
 
   // Save cluster info
+  if (onProgress) {
+    onProgress({ stage: "complete", message: "Cluster created successfully!" });
+  }
   await saveCluster({
     name,
     nodes,
@@ -208,7 +242,8 @@ async function createYugabytedClusterWithHostNetwork(
   version: string,
   createdContainers: string[],
   masterGFlags?: string,
-  tserverGFlags?: string
+  tserverGFlags?: string,
+  onProgress?: ProgressCallback
 ): Promise<void> {
   // Create a custom bridge network for better isolation and connectivity
   const networkName = `yb-${name}-network`;
@@ -221,8 +256,14 @@ async function createYugabytedClusterWithHostNetwork(
   }
   
   // Create custom bridge network
+  if (onProgress) {
+    onProgress({ stage: "network", message: `Creating network: ${networkName}...` });
+  }
   console.log(`[Docker] Creating custom bridge network: ${networkName}`);
   await executeDockerCommand(`docker network create ${networkName} 2>&1`);
+  if (onProgress) {
+    onProgress({ stage: "network", message: `Network created successfully` });
+  }
   
   const firstNodeName = `yb-${name}-node1`;
   const firstNodeHostname = firstNodeName;
@@ -243,6 +284,14 @@ async function createYugabytedClusterWithHostNetwork(
     const dataDir = path.join(os.homedir(), `yb_docker_data_${name}`, `node${i + 1}`);
     const containerDataDir = `/home/yugabyte/yb_data`;
 
+    if (onProgress) {
+      onProgress({ 
+        stage: "node", 
+        message: `Creating node ${i + 1} of ${nodes}...`,
+        nodeNumber: i + 1,
+        totalNodes: nodes
+      });
+    }
     console.log(`[Docker] Creating yugabyted container for node ${i + 1}...`);
     
     // For multi-node, join subsequent nodes to the first node using hostname
@@ -314,6 +363,15 @@ async function createYugabytedClusterWithHostNetwork(
     await executeDockerCommand(yugabytedCmd);
     createdContainers.push(nodeName);
     
+    if (onProgress) {
+      onProgress({ 
+        stage: "node", 
+        message: `Node ${i + 1} container created, starting...`,
+        nodeNumber: i + 1,
+        totalNodes: nodes
+      });
+    }
+    
     // Wait and verify it's running
     await new Promise((resolve) => setTimeout(resolve, 5000));
     
@@ -346,6 +404,14 @@ async function createYugabytedClusterWithHostNetwork(
     
     // For first node, wait longer for initialization before other nodes join
     if (i === 0) {
+      if (onProgress) {
+        onProgress({ 
+          stage: "init", 
+          message: `Waiting for first node to initialize...`,
+          nodeNumber: 1,
+          totalNodes: nodes
+        });
+      }
       console.log(`[Docker] Waiting for first node to fully initialize (15 seconds)...`);
       await new Promise((resolve) => setTimeout(resolve, 15000));
       

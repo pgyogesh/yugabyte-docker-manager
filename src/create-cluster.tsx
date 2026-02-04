@@ -1,6 +1,6 @@
 import { Action, ActionPanel, Form, showToast, Toast, Icon } from "@raycast/api";
-import { useState, useEffect } from "react";
-import { createYugabyteCluster } from "./utils/docker";
+import { useState, useEffect, useRef } from "react";
+import { createYugabyteCluster, ProgressCallback } from "./utils/docker";
 
 interface YugabyteRelease {
   name: string;
@@ -11,6 +11,7 @@ export default function Command() {
   const [isLoading, setIsLoading] = useState(false);
   const [releases, setReleases] = useState<YugabyteRelease[]>([]);
   const [isLoadingReleases, setIsLoadingReleases] = useState(true);
+  const toastRef = useRef<Toast | null>(null);
 
   async function fetchReleases() {
     try {
@@ -154,20 +155,11 @@ export default function Command() {
   }) {
     if (isLoading) return;
 
-    const name = values.name.trim();
+    const name = values.name.trim() || "my-cluster";
     const nodes = parseInt(values.nodes, 10);
     const version = values.version.trim() || "latest";
     const masterGFlags = values.masterGFlags?.trim() || undefined;
     const tserverGFlags = values.tserverGFlags?.trim() || undefined;
-
-    if (!name) {
-      await showToast({
-        style: Toast.Style.Failure,
-        title: "Invalid cluster name",
-        message: "Please enter a cluster name",
-      });
-      return;
-    }
 
     if (isNaN(nodes) || nodes < 1 || nodes > 10) {
       await showToast({
@@ -183,12 +175,65 @@ export default function Command() {
     if (masterGFlags) console.log(`[Create Cluster] Master GFlags: ${masterGFlags}`);
     if (tserverGFlags) console.log(`[Create Cluster] TServer GFlags: ${tserverGFlags}`);
 
+    // Show initial progress toast
+    const initialToast = await showToast({
+      style: Toast.Style.Animated,
+      title: "Creating Cluster",
+      message: "Initializing...",
+    });
+    toastRef.current = initialToast;
+
+    // Progress callback to update HUD
+    const progressCallback: ProgressCallback = async (progress) => {
+      let title = "Creating Cluster";
+      let message = progress.message;
+      
+      if (progress.stage === "cleanup") {
+        title = "Preparing";
+        message = "Cleaning up existing containers...";
+      } else if (progress.stage === "image") {
+        title = "Checking Image";
+        message = progress.message;
+      } else if (progress.stage === "network") {
+        title = "Setting Up Network";
+        message = progress.message;
+      } else if (progress.stage === "node") {
+        title = `Creating Node ${progress.nodeNumber}/${progress.totalNodes}`;
+        message = progress.message;
+      } else if (progress.stage === "init") {
+        title = "Initializing Cluster";
+        message = progress.message;
+      } else if (progress.stage === "finalize") {
+        title = "Finalizing";
+        message = progress.message;
+      } else if (progress.stage === "complete") {
+        title = "Cluster Created";
+        message = progress.message;
+      }
+
+      if (toastRef.current) {
+        toastRef.current.title = title;
+        toastRef.current.message = message;
+      } else {
+        toastRef.current = await showToast({
+          style: Toast.Style.Animated,
+          title,
+          message,
+        });
+      }
+    };
+
     try {
-      await createYugabyteCluster(name, nodes, version, masterGFlags, tserverGFlags);
+      await createYugabyteCluster(name, nodes, version, masterGFlags, tserverGFlags, progressCallback);
       console.log(`[Create Cluster] Successfully created cluster: ${name}`);
+      
+      // Dismiss progress toast and show success
+      if (toastRef.current) {
+        toastRef.current.hide();
+      }
       await showToast({
         style: Toast.Style.Success,
-        title: "Cluster created",
+        title: "Cluster Created",
         message: `YugabyteDB cluster "${name}" with ${nodes} node(s) created successfully`,
       });
     } catch (error: any) {
@@ -196,13 +241,19 @@ export default function Command() {
       console.error(`[Create Cluster] Error creating cluster: ${errorMsg}`);
       console.error(`[Create Cluster] Full error:`, error);
       console.error(`[Create Cluster] Stack trace:`, error.stack);
+      
+      // Dismiss progress toast and show error
+      if (toastRef.current) {
+        toastRef.current.hide();
+      }
       await showToast({
         style: Toast.Style.Failure,
-        title: "Error creating cluster",
+        title: "Error Creating Cluster",
         message: errorMsg,
       });
     } finally {
       setIsLoading(false);
+      toastRef.current = null;
     }
   }
 
@@ -229,8 +280,8 @@ export default function Command() {
         id="name"
         title="Cluster Name"
         placeholder="my-cluster"
-        defaultValue=""
-        info="Enter a unique name for your YugabyteDB cluster"
+        defaultValue="my-cluster"
+        info="Enter a unique name for your YugabyteDB cluster (default: my-cluster)"
       />
       <Form.TextField
         id="nodes"
