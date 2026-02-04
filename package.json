@@ -22,6 +22,12 @@
       "title": "List Clusters",
       "description": "List all YugabyteDB clusters with options to start, stop, or delete",
       "mode": "view"
+    },
+    {
+      "name": "view-cluster-services",
+      "title": "View Cluster Services",
+      "description": "View services running in a YugabyteDB cluster and access their UIs",
+      "mode": "view"
     }
   ],
   "dependencies": {

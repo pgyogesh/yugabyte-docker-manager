@@ -1,4 +1,4 @@
-import { Action, ActionPanel, List, showToast, Toast, Icon } from "@raycast/api";
+import { Action, ActionPanel, List, showToast, Toast, Icon, open } from "@raycast/api";
 import { useEffect, useState } from "react";
 import {
   getAllClusters,
@@ -6,6 +6,7 @@ import {
   stopCluster,
   deleteClusterContainers,
   getClusterStatus,
+  getClusterServices,
   ClusterInfo,
 } from "./utils/docker";
 
@@ -13,9 +14,16 @@ export default function Command() {
   const [clusters, setClusters] = useState<ClusterInfo[]>([]);
   const [isLoading, setIsLoading] = useState(true);
 
-  async function loadClusters() {
+  async function loadClusters(showFeedback = false) {
     try {
       setIsLoading(true);
+      if (showFeedback) {
+        await showToast({
+          style: Toast.Style.Animated,
+          title: "Refreshing clusters",
+          message: "Updating cluster list and status...",
+        });
+      }
       console.log("[List Clusters] Loading clusters...");
       const allClusters = await getAllClusters();
       console.log(`[List Clusters] Found ${allClusters.length} clusters`);
@@ -35,6 +43,15 @@ export default function Command() {
       
       setClusters(clustersWithStatus);
       console.log("[List Clusters] Successfully loaded clusters");
+      
+      if (showFeedback) {
+        const runningCount = clustersWithStatus.filter(c => c.status === "running").length;
+        await showToast({
+          style: Toast.Style.Success,
+          title: "Clusters Refreshed",
+          message: `${clustersWithStatus.length} cluster(s) found, ${runningCount} running`,
+        });
+      }
     } catch (error: any) {
       const errorMsg = error.message || "Unknown error occurred";
       console.error("[List Clusters] Error loading clusters:", errorMsg);
@@ -170,31 +187,98 @@ export default function Command() {
             ]}
             actions={
               <ActionPanel>
-                {cluster.status === "stopped" ? (
-                  <Action
-                    icon={Icon.Play}
-                    title="Start Cluster"
-                    onAction={() => handleStartCluster(cluster)}
-                  />
-                ) : (
-                  <Action
-                    icon={Icon.Stop}
-                    title="Stop Cluster"
-                    onAction={() => handleStopCluster(cluster)}
-                  />
+                <ActionPanel.Section title="Cluster Control">
+                  {cluster.status === "stopped" ? (
+                    <Action
+                      icon={Icon.Play}
+                      title="Start Cluster"
+                      onAction={() => handleStartCluster(cluster)}
+                      shortcut={{ modifiers: ["cmd"], key: "s" }}
+                    />
+                  ) : (
+                    <>
+                      <Action
+                        icon={Icon.Stop}
+                        title="Stop Cluster"
+                        onAction={() => handleStopCluster(cluster)}
+                        shortcut={{ modifiers: ["cmd"], key: "s" }}
+                      />
+                      <Action
+                        icon={Icon.ArrowClockwise}
+                        title="Restart Cluster"
+                        onAction={async () => {
+                          await handleStopCluster(cluster);
+                          await new Promise((resolve) => setTimeout(resolve, 2000));
+                          await handleStartCluster(cluster);
+                        }}
+                        shortcut={{ modifiers: ["cmd", "shift"], key: "r" }}
+                      />
+                    </>
+                  )}
+                </ActionPanel.Section>
+
+                {cluster.status === "running" && (
+                  <ActionPanel.Section title="Access UIs">
+                    <Action
+                      icon={Icon.Globe}
+                      title="Open YugabyteDB UI"
+                      onAction={async () => {
+                        try {
+                          const services = await getClusterServices(cluster.name);
+                          if (services.length > 0 && services[0].services.yugabyted) {
+                            open(`http://localhost:${services[0].ports.yugabytedUI}`);
+                            showToast({
+                              style: Toast.Style.Success,
+                              title: "Opening YugabyteDB UI",
+                              message: `Node 1 UI opened in browser`,
+                            });
+                          } else {
+                            showToast({
+                              style: Toast.Style.Failure,
+                              title: "UI not available",
+                              message: "Cluster services may not be running",
+                            });
+                          }
+                        } catch (error: any) {
+                          showToast({
+                            style: Toast.Style.Failure,
+                            title: "Error",
+                            message: error.message || "Could not open UI",
+                          });
+                        }
+                      }}
+                      shortcut={{ modifiers: ["cmd"], key: "u" }}
+                    />
+                    <Action
+                      icon={Icon.Eye}
+                      title="View All Services & UIs"
+                      onAction={() => {
+                        showToast({
+                          style: Toast.Style.Success,
+                          title: "View Services",
+                          message: "Use 'View Cluster Services' command for detailed service info",
+                        });
+                      }}
+                      shortcut={{ modifiers: ["cmd"], key: "v" }}
+                    />
+                  </ActionPanel.Section>
                 )}
-                <Action
-                  icon={Icon.Trash}
-                  title="Delete Cluster"
-                  style={Action.Style.Destructive}
-                  onAction={() => handleDeleteCluster(cluster)}
-                />
-                <Action
-                  icon={Icon.ArrowClockwise}
-                  title="Refresh"
-                  onAction={loadClusters}
-                  shortcut={{ modifiers: ["cmd"], key: "r" }}
-                />
+
+                <ActionPanel.Section title="Actions">
+                  <Action
+                    icon={Icon.ArrowClockwise}
+                    title="Refresh List"
+                    onAction={() => loadClusters(true)}
+                    shortcut={{ modifiers: ["cmd"], key: "r" }}
+                  />
+                  <Action
+                    icon={Icon.Trash}
+                    title="Delete Cluster"
+                    style={Action.Style.Destructive}
+                    onAction={() => handleDeleteCluster(cluster)}
+                    shortcut={{ modifiers: ["cmd"], key: "backspace" }}
+                  />
+                </ActionPanel.Section>
               </ActionPanel>
             }
           />
