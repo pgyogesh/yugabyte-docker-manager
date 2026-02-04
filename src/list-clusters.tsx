@@ -7,6 +7,7 @@ import {
   deleteClusterContainers,
   getClusterStatus,
   getClusterServices,
+  scaleCluster,
   ClusterInfo,
 } from "./utils/docker";
 import ViewClusterServices from "./view-cluster-services";
@@ -316,6 +317,160 @@ export default function Command() {
                       title="View All Services & UIs"
                       onAction={() => push(<ViewClusterServices initialClusterName={cluster.name} />)}
                       shortcut={{ modifiers: ["cmd"], key: "v" }}
+                    />
+                  </ActionPanel.Section>
+                )}
+
+                {cluster.status === "running" && (
+                  <ActionPanel.Section title="Database Connections">
+                    <Action
+                      icon={Icon.Terminal}
+                      title="Connect to YSQL (Node 1)"
+                      onAction={async () => {
+                        try {
+                          const services = await getClusterServices(cluster.name);
+                          if (services.length > 0) {
+                            const firstNode = services[0];
+                            const containerName = firstNode.containerName;
+                            const { exec } = await import("child_process");
+                            const { promisify } = await import("util");
+                            const execAsync = promisify(exec);
+                            
+                            // Open terminal with ysqlsh connection
+                            await execAsync(`osascript -e 'tell application "Terminal" to do script "docker exec -it ${containerName} bin/ysqlsh -h ${containerName}"'`);
+                            
+                            showToast({
+                              style: Toast.Style.Success,
+                              title: "Opening YSQL Connection",
+                              message: `Connecting to ${containerName}...`,
+                            });
+                          } else {
+                            showToast({
+                              style: Toast.Style.Failure,
+                              title: "Connection Failed",
+                              message: "No nodes found for this cluster",
+                            });
+                          }
+                        } catch (error: any) {
+                          showToast({
+                            style: Toast.Style.Failure,
+                            title: "Error",
+                            message: error.message || "Could not connect to YSQL",
+                          });
+                        }
+                      }}
+                      shortcut={{ modifiers: ["cmd", "shift"], key: "y" }}
+                    />
+                    <Action
+                      icon={Icon.Terminal}
+                      title="Connect to YCQL (Node 1)"
+                      onAction={async () => {
+                        try {
+                          const services = await getClusterServices(cluster.name);
+                          if (services.length > 0) {
+                            const firstNode = services[0];
+                            const containerName = firstNode.containerName;
+                            const { exec } = await import("child_process");
+                            const { promisify } = await import("util");
+                            const execAsync = promisify(exec);
+                            
+                            // Open terminal with ycqlsh connection
+                            await execAsync(`osascript -e 'tell application "Terminal" to do script "docker exec -it ${containerName} bin/ycqlsh ${containerName}"'`);
+                            
+                            showToast({
+                              style: Toast.Style.Success,
+                              title: "Opening YCQL Connection",
+                              message: `Connecting to ${containerName}...`,
+                            });
+                          } else {
+                            showToast({
+                              style: Toast.Style.Failure,
+                              title: "Connection Failed",
+                              message: "No nodes found for this cluster",
+                            });
+                          }
+                        } catch (error: any) {
+                          showToast({
+                            style: Toast.Style.Failure,
+                            title: "Error",
+                            message: error.message || "Could not connect to YCQL",
+                          });
+                        }
+                      }}
+                      shortcut={{ modifiers: ["cmd", "shift"], key: "c" }}
+                    />
+                  </ActionPanel.Section>
+                )}
+
+                {cluster.status === "running" && (
+                  <ActionPanel.Section title="Cluster Management">
+                    <Action
+                      icon={Icon.PlusMinusDivideMultiply}
+                      title="Scale Cluster"
+                      onAction={async () => {
+                        const { Form } = await import("@raycast/api");
+                        const scaleForm = (
+                          <Form
+                            actions={
+                              <ActionPanel>
+                                <Action.SubmitForm
+                                  icon={Icon.Checkmark}
+                                  title="Scale Cluster"
+                                  onSubmit={async (values: { nodes: string }) => {
+                                    try {
+                                      const targetNodes = parseInt(values.nodes, 10);
+                                      if (isNaN(targetNodes) || targetNodes < 1 || targetNodes > 10) {
+                                        await showToast({
+                                          style: Toast.Style.Failure,
+                                          title: "Invalid node count",
+                                          message: "Please enter a number between 1 and 10",
+                                        });
+                                        return;
+                                      }
+
+                                      await showToast({
+                                        style: Toast.Style.Animated,
+                                        title: "Scaling cluster",
+                                        message: `Scaling "${cluster.name}" to ${targetNodes} nodes...`,
+                                      });
+
+                                      await scaleCluster(cluster.name, targetNodes);
+                                      
+                                      await showToast({
+                                        style: Toast.Style.Success,
+                                        title: "Cluster Scaled",
+                                        message: `Cluster "${cluster.name}" scaled to ${targetNodes} nodes`,
+                                      });
+                                      
+                                      await loadClusters();
+                                    } catch (error: any) {
+                                      await showToast({
+                                        style: Toast.Style.Failure,
+                                        title: "Error scaling cluster",
+                                        message: error.message || "Unknown error occurred",
+                                      });
+                                    }
+                                  }}
+                                />
+                              </ActionPanel>
+                            }
+                          >
+                            <Form.Description
+                              title="Current Nodes"
+                              text={`${cluster.nodes} nodes`}
+                            />
+                            <Form.TextField
+                              id="nodes"
+                              title="Target Number of Nodes"
+                              placeholder={`${cluster.nodes}`}
+                              defaultValue={`${cluster.nodes}`}
+                              info="Enter the target number of nodes (1-10). The cluster will be scaled up or down accordingly."
+                            />
+                          </Form>
+                        );
+                        push(scaleForm);
+                      }}
+                      shortcut={{ modifiers: ["cmd"], key: "n" }}
                     />
                   </ActionPanel.Section>
                 )}

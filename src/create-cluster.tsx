@@ -1,4 +1,4 @@
-import { Action, ActionPanel, Form, showToast, Toast, Icon } from "@raycast/api";
+import { Action, ActionPanel, Form, showToast, Toast, Icon, open } from "@raycast/api";
 import { useState, useEffect, useRef } from "react";
 import { createYugabyteCluster, ProgressCallback } from "./utils/docker";
 
@@ -231,25 +231,81 @@ export default function Command() {
       if (toastRef.current) {
         toastRef.current.hide();
       }
+      
+      // Show success message and open List Clusters command
       await showToast({
         style: Toast.Style.Success,
         title: "Cluster Created",
-        message: `YugabyteDB cluster "${name}" with ${nodes} node(s) created successfully`,
+        message: `YugabyteDB cluster "${name}" created successfully`,
       });
+      
+      // Open the List Clusters command to show the newly created cluster
+      // Using the extension name and command name from package.json
+      try {
+        await open("raycast://extensions/pgyogesh/yugabyte-docker-manager/list-clusters");
+      } catch (error) {
+        // Fallback: if the URL doesn't work, just pop to root
+        console.log("[Create Cluster] Could not open list-clusters command directly, user can navigate manually");
+      }
     } catch (error: any) {
-      const errorMsg = error.message || "Unknown error occurred";
-      console.error(`[Create Cluster] Error creating cluster: ${errorMsg}`);
-      console.error(`[Create Cluster] Full error:`, error);
+      // Extract detailed error information
+      let errorMsg = error.message || "Unknown error occurred";
+      
+      // Include stderr if available (Docker errors are usually in stderr)
+      if (error.stderr) {
+        const stderrMsg = error.stderr.trim();
+        if (stderrMsg && stderrMsg.length > 0) {
+          // Extract the most relevant part of the error
+          const lines = stderrMsg.split('\n');
+          const relevantLine = lines.find((line: string) => 
+            line.includes('Error') || 
+            line.includes('error') || 
+            line.includes('failed') ||
+            line.includes('bind') ||
+            line.includes('port') ||
+            line.includes('already')
+          ) || lines[0];
+          
+          if (relevantLine) {
+            errorMsg = `${errorMsg}\n${relevantLine}`;
+          } else {
+            errorMsg = `${errorMsg}\n${stderrMsg.substring(0, 200)}`; // First 200 chars
+          }
+        }
+      }
+      
+      // Include stdout if it contains error info
+      if (error.stdout && error.stdout.trim()) {
+        const stdoutMsg = error.stdout.trim();
+        if (stdoutMsg.length < 200) {
+          errorMsg = `${errorMsg}\n${stdoutMsg}`;
+        }
+      }
+      
+      console.error(`[Create Cluster] ========== ERROR CREATING CLUSTER ==========`);
+      console.error(`[Create Cluster] Error message: ${error.message || "Unknown error"}`);
+      console.error(`[Create Cluster] Exit code: ${error.code || "unknown"}`);
+      if (error.stdout) {
+        console.error(`[Create Cluster] Docker stdout: ${error.stdout}`);
+      }
+      if (error.stderr) {
+        console.error(`[Create Cluster] Docker stderr: ${error.stderr}`);
+      }
+      console.error(`[Create Cluster] Full error object:`, error);
       console.error(`[Create Cluster] Stack trace:`, error.stack);
+      console.error(`[Create Cluster] ===========================================`);
       
       // Dismiss progress toast and show error
       if (toastRef.current) {
         toastRef.current.hide();
       }
+      
+      // Show error message (truncate if too long for toast)
+      const displayMsg = errorMsg.length > 150 ? errorMsg.substring(0, 150) + "..." : errorMsg;
       await showToast({
         style: Toast.Style.Failure,
         title: "Error Creating Cluster",
-        message: errorMsg,
+        message: displayMsg,
       });
     } finally {
       setIsLoading(false);
@@ -293,7 +349,7 @@ export default function Command() {
       <Form.Dropdown
         id="version"
         title="YugabyteDB Version"
-        defaultValue="latest"
+        defaultValue={releases.length > 0 ? releases[0].tag : "latest"}
         isLoading={isLoadingReleases}
         info="Select a YugabyteDB version from the list. Press Cmd+R to refresh releases."
       >
@@ -309,16 +365,16 @@ export default function Command() {
       <Form.TextArea
         id="masterGFlags"
         title="Master GFlags (Optional)"
-        placeholder="--max_log_size=256 --log_min_seconds_to_retain=3600"
+        placeholder="max_log_size=256,log_min_seconds_to_retain=3600"
         defaultValue=""
-        info="Custom GFlags for yb-master. Format: --flag1=value1 --flag2=value2"
+        info="Custom GFlags for yb-master. Format: flag1=value1,flag2=value2 (comma-separated, no -- prefix)"
       />
       <Form.TextArea
         id="tserverGFlags"
         title="TServer GFlags (Optional)"
-        placeholder="--max_log_size=256 --log_min_seconds_to_retain=3600"
+        placeholder="pg_yb_session_timeout_ms=1200000,ysql_max_connections=400"
         defaultValue=""
-        info="Custom GFlags for yb-tserver. Format: --flag1=value1 --flag2=value2"
+        info="Custom GFlags for yb-tserver. Format: flag1=value1,flag2=value2 (comma-separated, no -- prefix)"
       />
     </Form>
   );

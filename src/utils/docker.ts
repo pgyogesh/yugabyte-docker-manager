@@ -3,6 +3,14 @@ import { promisify } from "util";
 
 const execAsync = promisify(exec);
 
+export interface NodePorts {
+  yugabytedUI: number;
+  masterUI: number;
+  tserverUI: number;
+  ysql: number;
+  ycql: number;
+}
+
 export interface ClusterInfo {
   name: string;
   nodes: number;
@@ -10,6 +18,7 @@ export interface ClusterInfo {
   status: "running" | "stopped";
   masterGFlags?: string;
   tserverGFlags?: string;
+  nodePorts?: NodePorts[]; // Store actual ports used for each node
 }
 
 const CLUSTER_STORAGE_FILE = `${process.env.HOME}/.yugabyte-clusters.json`;
@@ -67,14 +76,37 @@ export async function executeDockerCommand(command: string): Promise<{ stdout: s
     if (result.stderr) console.log(`[Docker] stderr: ${result.stderr.trim()}`);
     return result;
   } catch (error: any) {
-    const errorMsg = `Docker command failed: ${error.message}`;
-    console.error(`[Docker] Command failed: ${command}`);
-    console.error(`[Docker] Error: ${errorMsg}`);
-    if (error.stdout) console.error(`[Docker] Error stdout: ${error.stdout}`);
-    if (error.stderr) console.error(`[Docker] Error stderr: ${error.stderr}`);
+    // Capture full error details
+    const stdout = error.stdout || "";
+    const stderr = error.stderr || "";
+    const errorCode = error.code || "unknown";
+    
+    // Build comprehensive error message
+    let errorMsg = `Docker command failed: ${error.message || "Unknown error"}`;
+    if (stderr) {
+      errorMsg += `\nDocker stderr: ${stderr}`;
+    }
+    if (stdout) {
+      errorMsg += `\nDocker stdout: ${stdout}`;
+    }
+    errorMsg += `\nExit code: ${errorCode}`;
+    
+    console.error(`[Docker] ========== COMMAND FAILED ==========`);
+    console.error(`[Docker] Command: ${command}`);
+    console.error(`[Docker] Error message: ${error.message || "Unknown error"}`);
+    console.error(`[Docker] Exit code: ${errorCode}`);
+    if (stdout) {
+      console.error(`[Docker] stdout: ${stdout}`);
+    }
+    if (stderr) {
+      console.error(`[Docker] stderr: ${stderr}`);
+    }
+    console.error(`[Docker] ====================================`);
+    
     const enhancedError = new Error(errorMsg);
-    (enhancedError as any).stdout = error.stdout;
-    (enhancedError as any).stderr = error.stderr;
+    (enhancedError as any).stdout = stdout;
+    (enhancedError as any).stderr = stderr;
+    (enhancedError as any).code = errorCode;
     throw enhancedError;
   }
 }
@@ -88,6 +120,163 @@ export interface ClusterCreationProgress {
 
 export type ProgressCallback = (progress: ClusterCreationProgress) => void;
 
+async function isPortAvailable(port: number): Promise<boolean> {
+  // Check Docker containers first (both running and stopped)
+  try {
+    // Method 1: Check running containers - Docker port format: "0.0.0.0:5433->5433/tcp" or "[::]:5433->5433/tcp"
+    try {
+      const dockerPsResult = await executeDockerCommand(`docker ps --format "{{.Ports}}" 2>/dev/null || echo ""`);
+      const dockerPorts = dockerPsResult.stdout || "";
+      
+      // Check multiple port patterns to catch different Docker output formats
+      // Format examples: "0.0.0.0:5433->5433/tcp", ":5433->5433/tcp", "5433->5433/tcp"
+      if (dockerPorts.includes(`:${port}->`) || dockerPorts.includes(`:${port}/tcp`) || dockerPorts.match(new RegExp(`[^0-9]${port}->`))) {
+        console.log(`[Docker] Port ${port} is in use by running Docker container`);
+        console.log(`[Docker] Docker ports output: ${dockerPorts.substring(0, 200)}`);
+        return false;
+      }
+    } catch (error: any) {
+      // If docker ps fails, continue to next check
+      console.log(`[Docker] Could not check running containers for port ${port}: ${error.message || error}`);
+    }
+    
+    // Method 2: Check all containers (including stopped) for port bindings
+    try {
+      const dockerPsAllResult = await executeDockerCommand(`docker ps -a --format "{{.Ports}}" 2>/dev/null || echo ""`);
+      const allPorts = dockerPsAllResult.stdout || "";
+      if (allPorts.includes(`:${port}->`) || allPorts.includes(`:${port}/tcp`) || allPorts.match(new RegExp(`[^0-9]${port}->`))) {
+        console.log(`[Docker] Port ${port} is bound by Docker container (stopped or running)`);
+        console.log(`[Docker] All containers ports output: ${allPorts.substring(0, 200)}`);
+        return false;
+      }
+    } catch (error: any) {
+      console.log(`[Docker] Could not check all containers for port ${port}: ${error.message || error}`);
+    }
+    
+    // Method 3: Use docker inspect to check port bindings more reliably
+    try {
+      const dockerInspectResult = await executeDockerCommand(`docker ps -a -q | xargs -I {} sh -c 'docker port {} 2>/dev/null | grep -E ":${port}(->|/)" || true' || echo ""`);
+      if (dockerInspectResult.stdout && dockerInspectResult.stdout.trim()) {
+        console.log(`[Docker] Port ${port} is bound (found via docker port): ${dockerInspectResult.stdout.trim()}`);
+        return false;
+      }
+    } catch (error: any) {
+      // docker port might fail, that's okay - continue to lsof check
+      console.log(`[Docker] Could not check port ${port} via docker port: ${error.message || error}`);
+    }
+  } catch (error: any) {
+    // Docker command failed, continue to next check
+    console.log(`[Docker] Could not check Docker for port ${port}, trying lsof...`);
+  }
+  
+  // Check with lsof (lsof returns error code 1 when port is not in use, which is normal)
+  try {
+    const { exec } = await import("child_process");
+    const { promisify } = await import("util");
+    const execAsync = promisify(exec);
+    
+    // Use execAsync directly to handle exit codes properly
+    // lsof -ti:PORT returns PID if in use, or exits with code 1 if not in use
+    try {
+      const lsofResult = await execAsync(`lsof -ti:${port} 2>&1`);
+      const output = (lsofResult.stdout || "").trim();
+      
+      // If lsof returns a process ID (numeric), port is in use
+      if (output && /^\d+$/.test(output)) {
+        console.log(`[Docker] Port ${port} is in use by PID ${output}`);
+        return false;
+      }
+    } catch (lsofError: any) {
+      // lsof exits with code 1 when port is not in use (this is normal, not an error)
+      if (lsofError.code === 1) {
+        // Port is not in use - this is the expected case
+        return true;
+      }
+      
+      // If we got output with a PID in stderr or stdout, port might be in use
+      const errorOutput = (lsofError.stdout || lsofError.stderr || "").trim();
+      if (errorOutput && /^\d+$/.test(errorOutput)) {
+        console.log(`[Docker] Port ${port} is in use by PID ${errorOutput}`);
+        return false;
+      }
+      
+      // Other errors - assume port is available to be safe
+      console.log(`[Docker] Could not check port ${port} with lsof, assuming available`);
+      return true;
+    }
+  } catch (error: any) {
+    // Unexpected error - assume port is available to be safe
+    console.log(`[Docker] Error checking port ${port}, assuming available: ${error.message || error}`);
+    return true;
+  }
+  
+  return true;
+}
+
+async function findAvailablePortSet(startOffset: number): Promise<NodePorts> {
+  let offset = startOffset;
+  const maxOffset = 1000; // Safety limit
+  
+  console.log(`[Docker] Finding available port set starting from offset ${offset}...`);
+  
+  while (offset < maxOffset) {
+    const ports: NodePorts = {
+      yugabytedUI: 15433 + offset,
+      masterUI: 7000 + offset,
+      tserverUI: 9000 + offset,
+      ysql: 5433 + offset,
+      ycql: 9042 + offset,
+    };
+    
+    console.log(`[Docker] Checking port set at offset ${offset}: YSQL=${ports.ysql}, YCQL=${ports.ycql}, UI=${ports.yugabytedUI}, Master=${ports.masterUI}, TServer=${ports.tserverUI}`);
+    
+    // Check if all ports in this set are available
+    const checks = await Promise.all([
+      isPortAvailable(ports.yugabytedUI),
+      isPortAvailable(ports.masterUI),
+      isPortAvailable(ports.tserverUI),
+      isPortAvailable(ports.ysql),
+      isPortAvailable(ports.ycql),
+    ]);
+    
+    const allAvailable = checks.every(available => available);
+    if (allAvailable) {
+      console.log(`[Docker] Found available port set at offset ${offset}`);
+      return ports;
+    } else {
+      // Log which ports are unavailable
+      const unavailablePorts = [];
+      if (!checks[0]) unavailablePorts.push(`YugabyteDB UI (${ports.yugabytedUI})`);
+      if (!checks[1]) unavailablePorts.push(`Master UI (${ports.masterUI})`);
+      if (!checks[2]) unavailablePorts.push(`TServer UI (${ports.tserverUI})`);
+      if (!checks[3]) unavailablePorts.push(`YSQL (${ports.ysql})`);
+      if (!checks[4]) unavailablePorts.push(`YCQL (${ports.ycql})`);
+      console.log(`[Docker] Port set at offset ${offset} unavailable: ${unavailablePorts.join(", ")}`);
+    }
+    
+    offset++;
+  }
+  
+  throw new Error(`Could not find available port set after checking ${maxOffset} offsets`);
+}
+
+export async function findAvailablePortsForNodes(nodes: number): Promise<NodePorts[]> {
+  console.log(`[Docker] ========== STARTING PORT ASSIGNMENT ==========`);
+  console.log(`[Docker] Finding available ports for ${nodes} node(s)...`);
+  const nodePorts: NodePorts[] = [];
+  
+  for (let i = 0; i < nodes; i++) {
+    const defaultOffset = i;
+    console.log(`[Docker] Assigning ports for node ${i + 1} (starting from offset ${defaultOffset})...`);
+    const ports = await findAvailablePortSet(defaultOffset);
+    nodePorts.push(ports);
+    console.log(`[Docker] ✓ Assigned ports for node ${i + 1}: YSQL=${ports.ysql}, YCQL=${ports.ycql}, UI=${ports.yugabytedUI}, Master=${ports.masterUI}, TServer=${ports.tserverUI}`);
+  }
+  
+  console.log(`[Docker] ========== PORT ASSIGNMENT COMPLETE ==========`);
+  return nodePorts;
+}
+
 export async function createYugabyteCluster(
   name: string,
   nodes: number,
@@ -96,18 +285,45 @@ export async function createYugabyteCluster(
   tserverGFlags?: string,
   onProgress?: ProgressCallback
 ): Promise<void> {
+  // Find available ports for all nodes (automatically assigns next available if conflicts)
+  if (onProgress) {
+    onProgress({ stage: "checking", message: "Finding available ports..." });
+  }
+  console.log(`[Docker] Finding available ports for ${nodes}-node cluster...`);
+  const nodePorts = await findAvailablePortsForNodes(nodes);
+  
   // Clean up any existing containers with the same name pattern (from previous failed attempts)
   if (onProgress) {
     onProgress({ stage: "cleanup", message: "Cleaning up existing containers..." });
   }
   console.log(`[Docker] Cleaning up any existing containers for cluster ${name}...`);
-  for (let i = 0; i < nodes; i++) {
-    const nodeName = `yb-${name}-node${i + 1}`;
-    try {
-      await executeDockerCommand(`docker rm -f ${nodeName}-master ${nodeName}-tserver ${nodeName} 2>/dev/null || true`);
-    } catch (error) {
-      // Ignore errors if containers don't exist
+  
+  // Get all containers that might conflict
+  try {
+    const existingContainers = await executeDockerCommand(`docker ps -a --filter "name=yb-${name}-" --format "{{.Names}}" 2>/dev/null || echo ""`);
+    if (existingContainers.stdout && existingContainers.stdout.trim()) {
+      const containerNames = existingContainers.stdout.trim().split('\n').filter(n => n.trim());
+      console.log(`[Docker] Found ${containerNames.length} existing container(s) to clean up: ${containerNames.join(', ')}`);
+      for (const containerName of containerNames) {
+        try {
+          await executeDockerCommand(`docker rm -f ${containerName} 2>/dev/null || true`);
+          console.log(`[Docker] Removed container: ${containerName}`);
+        } catch (error: any) {
+          console.log(`[Docker] Could not remove container ${containerName}: ${error.message || error}`);
+        }
+      }
     }
+  } catch (error: any) {
+    console.log(`[Docker] Could not check for existing containers, continuing...`);
+  }
+  
+  // Also try to remove network if it exists
+  const networkName = `yb-${name}-network`;
+  try {
+    await executeDockerCommand(`docker network rm ${networkName} 2>/dev/null || true`);
+    console.log(`[Docker] Removed network: ${networkName}`);
+  } catch (error) {
+    // Network doesn't exist, that's fine
   }
   
   // Network will be created in createYugabytedClusterWithHostNetwork
@@ -195,7 +411,7 @@ export async function createYugabyteCluster(
   
   try {
     // Always use yugabyted with custom bridge network
-    await createYugabytedClusterWithHostNetwork(name, nodes, version, createdContainers, masterGFlags, tserverGFlags, onProgress);
+    await createYugabytedClusterWithHostNetwork(name, nodes, version, createdContainers, masterGFlags, tserverGFlags, onProgress, nodePorts);
   } catch (error: any) {
     // Rollback: clean up any containers we created
     console.error(`[Docker] Error creating cluster, cleaning up created containers...`);
@@ -233,6 +449,7 @@ export async function createYugabyteCluster(
     status: "running",
     masterGFlags,
     tserverGFlags,
+    nodePorts, // Store the actual ports used
   });
 }
 
@@ -243,7 +460,8 @@ async function createYugabytedClusterWithHostNetwork(
   createdContainers: string[],
   masterGFlags?: string,
   tserverGFlags?: string,
-  onProgress?: ProgressCallback
+  onProgress?: ProgressCallback,
+  nodePorts?: NodePorts[]
 ): Promise<void> {
   // Create a custom bridge network for better isolation and connectivity
   const networkName = `yb-${name}-network`;
@@ -271,12 +489,24 @@ async function createYugabytedClusterWithHostNetwork(
   for (let i = 0; i < nodes; i++) {
     const nodeName = `yb-${name}-node${i + 1}`;
     const nodeHostname = nodeName;
-    const masterPort = 7100 + i;
-    const yqlPort = 9042 + i;
-    const ysqlPort = 5433 + i;
-    const webPort = 7000 + i;
-    const yugabytedUIPort = 15433 + i; // YugabyteDB UI port (15433, 15434, 15435, etc.)
-    const tserverPort = 9000 + i;
+    
+    // Use assigned ports from nodePorts if provided, otherwise fall back to default offsets
+    const ports = nodePorts && nodePorts[i] ? nodePorts[i] : {
+      yugabytedUI: 15433 + i,
+      masterUI: 7000 + i,
+      tserverUI: 9000 + i,
+      ysql: 5433 + i,
+      ycql: 9042 + i,
+    };
+    
+    const masterPort = 7100 + i; // Internal port, not mapped
+    const yqlPort = ports.ycql;
+    const ysqlPort = ports.ysql;
+    const webPort = ports.masterUI;
+    const yugabytedUIPort = ports.yugabytedUI;
+    const tserverPort = ports.tserverUI;
+    
+    console.log(`[Docker] Using ports for node ${i + 1}: YSQL=${ysqlPort}, YCQL=${yqlPort}, UI=${yugabytedUIPort}, Master=${webPort}, TServer=${tserverPort}`);
     
     // Use persistent data directory on host (like the working example)
     const os = await import("os");
@@ -317,18 +547,34 @@ async function createYugabytedClusterWithHostNetwork(
     
     // Add GFlags if provided
     // yugabyted accepts GFlags via --master_flags and --tserver_flags
-    // Format: --master_flags="--flag1=value1 --flag2=value2"
+    // Format: --master_flags="flag1=value1,flag2=value2" (comma-separated, no -- prefix)
     if (masterGFlags && masterGFlags.trim()) {
+      // Process GFlags: convert spaces/newlines to commas, remove -- prefixes
+      let processedMasterFlags = masterGFlags.trim()
+        .split(/[\s,\n]+/)
+        .map(flag => flag.trim())
+        .filter(flag => flag.length > 0)
+        .map(flag => flag.replace(/^--+/, '')) // Remove leading -- or -
+        .join(',');
+      
       // Escape quotes in GFlags and wrap in quotes
-      const escapedMasterFlags = masterGFlags.trim().replace(/"/g, '\\"');
+      const escapedMasterFlags = processedMasterFlags.replace(/"/g, '\\"');
       yugabytedArgs += ` --master_flags="${escapedMasterFlags}"`;
-      console.log(`[Docker] Adding master GFlags to node ${i + 1}: ${masterGFlags}`);
+      console.log(`[Docker] Adding master GFlags to node ${i + 1}: ${processedMasterFlags}`);
     }
     if (tserverGFlags && tserverGFlags.trim()) {
+      // Process GFlags: convert spaces/newlines to commas, remove -- prefixes
+      let processedTserverFlags = tserverGFlags.trim()
+        .split(/[\s,\n]+/)
+        .map(flag => flag.trim())
+        .filter(flag => flag.length > 0)
+        .map(flag => flag.replace(/^--+/, '')) // Remove leading -- or -
+        .join(',');
+      
       // Escape quotes in GFlags and wrap in quotes
-      const escapedTserverFlags = tserverGFlags.trim().replace(/"/g, '\\"');
+      const escapedTserverFlags = processedTserverFlags.replace(/"/g, '\\"');
       yugabytedArgs += ` --tserver_flags="${escapedTserverFlags}"`;
-      console.log(`[Docker] Adding tserver GFlags to node ${i + 1}: ${tserverGFlags}`);
+      console.log(`[Docker] Adding tserver GFlags to node ${i + 1}: ${processedTserverFlags}`);
     }
     
     // Create data directory on host if it doesn't exist
@@ -542,6 +788,257 @@ export async function stopCluster(name: string): Promise<void> {
   await updateClusterStatus(name, "stopped");
 }
 
+export async function scaleCluster(
+  name: string,
+  targetNodes: number,
+  onProgress?: ProgressCallback
+): Promise<void> {
+  const cluster = await getCluster(name);
+  if (!cluster) {
+    throw new Error(`Cluster "${name}" not found`);
+  }
+
+  const currentNodes = cluster.nodes;
+  
+  if (targetNodes === currentNodes) {
+    throw new Error(`Cluster already has ${targetNodes} nodes`);
+  }
+
+  if (targetNodes < 1 || targetNodes > 10) {
+    throw new Error("Number of nodes must be between 1 and 10");
+  }
+
+  if (cluster.status !== "running") {
+    throw new Error(`Cluster "${name}" must be running to scale. Please start it first.`);
+  }
+
+  console.log(`[Docker] Scaling cluster ${name} from ${currentNodes} to ${targetNodes} nodes`);
+
+  if (targetNodes > currentNodes) {
+    // Add nodes
+    const nodesToAdd = targetNodes - currentNodes;
+    if (onProgress) {
+      onProgress({ stage: "scaling", message: `Adding ${nodesToAdd} node(s) to cluster...` });
+    }
+
+    const networkName = `yb-${name}-network`;
+    const firstNodeName = `yb-${name}-node1`;
+    const firstNodeHostname = firstNodeName;
+    const createdContainers: string[] = [];
+
+    // Get existing containers to find the last node number
+    const existingContainers = await getClusterContainers(name);
+    const lastNodeNumber = existingContainers.length;
+
+    // Find available ports for new nodes
+    const newNodePorts: NodePorts[] = [];
+    for (let i = 0; i < nodesToAdd; i++) {
+      const defaultOffset = lastNodeNumber + i;
+      const ports = await findAvailablePortSet(defaultOffset);
+      newNodePorts.push(ports);
+      console.log(`[Docker] Assigned ports for new node ${lastNodeNumber + i + 1}: YSQL=${ports.ysql}, YCQL=${ports.ycql}, UI=${ports.yugabytedUI}`);
+    }
+
+    for (let i = 0; i < nodesToAdd; i++) {
+      const nodeNumber = lastNodeNumber + i + 1;
+      const nodeName = `yb-${name}-node${nodeNumber}`;
+      const nodeHostname = nodeName;
+      const ports = newNodePorts[i];
+      
+      const yugabytedUIPort = ports.yugabytedUI;
+      const webPort = ports.masterUI;
+      const tserverPort = ports.tserverUI;
+      const ysqlPort = ports.ysql;
+      const yqlPort = ports.ycql;
+
+      const os = await import("os");
+      const path = await import("path");
+      const dataDir = path.join(os.homedir(), `yb_docker_data_${name}`, `node${nodeNumber}`);
+      const containerDataDir = `/home/yugabyte/yb_data`;
+
+      if (onProgress) {
+        onProgress({ 
+          stage: "scaling", 
+          message: `Creating node ${nodeNumber} of ${targetNodes}...`,
+          nodeNumber,
+          totalNodes: targetNodes
+        });
+      }
+
+      // Join flag - always join to first node
+      const joinFlag = `--join=${firstNodeHostname}`;
+
+      // Build yugabyted command
+      let yugabytedArgs = `--base_dir=${containerDataDir} --background=false ${joinFlag}`;
+
+      // Add GFlags if provided
+      if (cluster.masterGFlags && cluster.masterGFlags.trim()) {
+        let processedMasterFlags = cluster.masterGFlags.trim()
+          .split(/[\s,\n]+/)
+          .map(flag => flag.trim())
+          .filter(flag => flag.length > 0)
+          .map(flag => flag.replace(/^--+/, ''))
+          .join(',');
+        const escapedMasterFlags = processedMasterFlags.replace(/"/g, '\\"');
+        yugabytedArgs += ` --master_flags="${escapedMasterFlags}"`;
+      }
+      if (cluster.tserverGFlags && cluster.tserverGFlags.trim()) {
+        let processedTserverFlags = cluster.tserverGFlags.trim()
+          .split(/[\s,\n]+/)
+          .map(flag => flag.trim())
+          .filter(flag => flag.length > 0)
+          .map(flag => flag.replace(/^--+/, ''))
+          .join(',');
+        const escapedTserverFlags = processedTserverFlags.replace(/"/g, '\\"');
+        yugabytedArgs += ` --tserver_flags="${escapedTserverFlags}"`;
+      }
+
+      // Create data directory
+      const fs = await import("fs/promises");
+      try {
+        await fs.mkdir(dataDir, { recursive: true });
+        console.log(`[Docker] Created data directory: ${dataDir}`);
+      } catch (mkdirError) {
+        console.log(`[Docker] Note: Could not create data directory, continuing anyway`);
+      }
+
+      // Create container
+      const yugabytedCmd = `docker run -d --name ${nodeName} \
+        --network ${networkName} \
+        --hostname ${nodeHostname} \
+        -p ${yugabytedUIPort}:15433 \
+        -p ${webPort}:7000 \
+        -p ${tserverPort}:9000 \
+        -p ${ysqlPort}:5433 \
+        -v ${dataDir}:${containerDataDir} \
+        --restart unless-stopped \
+        yugabytedb/yugabyte:${cluster.version} \
+        bin/yugabyted start ${yugabytedArgs}`;
+
+      console.log(`[Docker] Executing: ${yugabytedCmd}`);
+      await executeDockerCommand(yugabytedCmd);
+      createdContainers.push(nodeName);
+
+      // Wait and verify it's running
+      await new Promise((resolve) => setTimeout(resolve, 5000));
+
+      let isRunning = false;
+      let retries = 3;
+      while (retries > 0 && !isRunning) {
+        try {
+          const statusCheck = await executeDockerCommand(`docker ps --filter "name=${nodeName}" --format "{{.Status}}"`);
+          if (statusCheck.stdout && statusCheck.stdout.trim().includes("Up")) {
+            console.log(`[Docker] ✓ Container ${nodeName} is running: ${statusCheck.stdout.trim()}`);
+            isRunning = true;
+          } else {
+            retries--;
+            if (retries > 0) {
+              await new Promise((resolve) => setTimeout(resolve, 2000));
+            }
+          }
+        } catch (statusError) {
+          retries--;
+          if (retries > 0) {
+            await new Promise((resolve) => setTimeout(resolve, 2000));
+          }
+        }
+      }
+
+      if (!isRunning) {
+        const logs = await executeDockerCommand(`docker logs ${nodeName} 2>&1`);
+        throw new Error(`Container ${nodeName} stopped: ${logs.stdout || logs.stderr}`);
+      }
+
+      // Wait a bit before adding next node
+      if (i < nodesToAdd - 1) {
+        await new Promise((resolve) => setTimeout(resolve, 5000));
+      }
+
+      // Add Warp integration
+      await addWarpIntegration(nodeName);
+    }
+
+    // Update cluster info with new node count and ports
+    const updatedNodePorts = cluster.nodePorts ? [...cluster.nodePorts, ...newNodePorts] : newNodePorts;
+    await saveCluster({
+      ...cluster,
+      nodes: targetNodes,
+      nodePorts: updatedNodePorts,
+    });
+
+    if (onProgress) {
+      onProgress({ stage: "complete", message: `Successfully scaled cluster to ${targetNodes} nodes` });
+    }
+  } else {
+    // Remove nodes
+    const nodesToRemove = currentNodes - targetNodes;
+    if (onProgress) {
+      onProgress({ stage: "scaling", message: `Removing ${nodesToRemove} node(s) from cluster...` });
+    }
+
+    // Get containers sorted by node number (remove from highest to lowest)
+    const containers = await getClusterContainers(name);
+    const containersToRemove = containers
+      .sort((a, b) => {
+        const aMatch = a.match(/node(\d+)/);
+        const bMatch = b.match(/node(\d+)/);
+        const aNum = aMatch ? parseInt(aMatch[1], 10) : 0;
+        const bNum = bMatch ? parseInt(bMatch[1], 10) : 0;
+        return bNum - aNum; // Sort descending
+      })
+      .slice(0, nodesToRemove);
+
+    for (const containerName of containersToRemove) {
+      if (onProgress) {
+        const nodeMatch = containerName.match(/node(\d+)/);
+        const nodeNum = nodeMatch ? parseInt(nodeMatch[1], 10) : 0;
+        onProgress({ 
+          stage: "scaling", 
+          message: `Removing node ${nodeNum}...`,
+        });
+      }
+
+      // Stop and remove container
+      await executeDockerCommand(`docker stop ${containerName} 2>/dev/null || true`);
+      await executeDockerCommand(`docker rm -f ${containerName} 2>/dev/null || true`);
+
+      // Remove data directory for this node
+      try {
+        const nodeMatch = containerName.match(/node(\d+)/);
+        if (nodeMatch) {
+          const nodeNum = nodeMatch[1];
+          const os = await import("os");
+          const path = await import("path");
+          const fs = await import("fs/promises");
+          const dataDir = path.join(os.homedir(), `yb_docker_data_${name}`, `node${nodeNum}`);
+          try {
+            await fs.rm(dataDir, { recursive: true, force: true });
+            console.log(`[Docker] Removed data directory: ${dataDir}`);
+          } catch (rmError) {
+            console.log(`[Docker] Note: Could not remove data directory: ${dataDir}`);
+          }
+        }
+      } catch (error) {
+        // Ignore errors
+      }
+    }
+
+    // Update cluster info with new node count (remove ports for removed nodes)
+    const updatedNodePorts = cluster.nodePorts ? cluster.nodePorts.slice(0, targetNodes) : undefined;
+    await saveCluster({
+      ...cluster,
+      nodes: targetNodes,
+      nodePorts: updatedNodePorts,
+    });
+
+    if (onProgress) {
+      onProgress({ stage: "complete", message: `Successfully scaled cluster to ${targetNodes} nodes` });
+    }
+  }
+
+  console.log(`[Docker] Successfully scaled cluster ${name} to ${targetNodes} nodes`);
+}
+
 export async function deleteClusterContainers(name: string): Promise<void> {
   const containers = await getClusterContainers(name);
   for (const container of containers) {
@@ -549,6 +1046,30 @@ export async function deleteClusterContainers(name: string): Promise<void> {
   }
   const networkName = `yb-${name}-network`;
   await executeDockerCommand(`docker network rm ${networkName} 2>/dev/null || true`);
+  
+  // Delete the data directory
+  try {
+    const os = await import("os");
+    const path = await import("path");
+    const fs = await import("fs/promises");
+    const dataDir = path.join(os.homedir(), `yb_docker_data_${name}`);
+    
+    console.log(`[Docker] Deleting data directory: ${dataDir}`);
+    try {
+      await fs.access(dataDir);
+      // Directory exists, delete it recursively
+      await fs.rm(dataDir, { recursive: true, force: true });
+      console.log(`[Docker] Successfully deleted data directory: ${dataDir}`);
+    } catch (accessError) {
+      // Directory doesn't exist, that's fine
+      console.log(`[Docker] Data directory does not exist: ${dataDir}`);
+    }
+  } catch (error: any) {
+    // Log error but don't fail the deletion if directory cleanup fails
+    console.error(`[Docker] Error deleting data directory for cluster ${name}:`, error.message || error);
+    console.log(`[Docker] Continuing with cluster deletion despite directory cleanup error`);
+  }
+  
   await deleteCluster(name);
 }
 
@@ -672,15 +1193,49 @@ export async function getClusterServices(name: string): Promise<ClusterService[]
     const nodeMatch = containerName.match(/node(\d+)/);
     const extractedNodeNumber = nodeMatch ? parseInt(nodeMatch[1], 10) : nodeNumber;
     
-    // Calculate ports based on node number (0-indexed)
-    const nodeIndex = extractedNodeNumber - 1;
-    const ports = {
-      masterUI: 7000 + nodeIndex,
-      tserverUI: 9000 + nodeIndex,
-      yugabytedUI: 15433 + nodeIndex,
-      ysql: 5433 + nodeIndex,
-      ycql: 9042 + nodeIndex,
-    };
+    // Get cluster info to check for stored ports
+    const clusterName = containerName.match(/yb-(.+)-node/)?.[1];
+    let ports: NodePorts;
+    
+    if (clusterName) {
+      try {
+        const cluster = await getCluster(clusterName);
+        if (cluster && cluster.nodePorts && cluster.nodePorts[extractedNodeNumber - 1]) {
+          // Use stored ports
+          ports = cluster.nodePorts[extractedNodeNumber - 1];
+        } else {
+          // Fallback to calculated ports
+          const nodeIndex = extractedNodeNumber - 1;
+          ports = {
+            masterUI: 7000 + nodeIndex,
+            tserverUI: 9000 + nodeIndex,
+            yugabytedUI: 15433 + nodeIndex,
+            ysql: 5433 + nodeIndex,
+            ycql: 9042 + nodeIndex,
+          };
+        }
+      } catch (error) {
+        // Fallback to calculated ports
+        const nodeIndex = extractedNodeNumber - 1;
+        ports = {
+          masterUI: 7000 + nodeIndex,
+          tserverUI: 9000 + nodeIndex,
+          yugabytedUI: 15433 + nodeIndex,
+          ysql: 5433 + nodeIndex,
+          ycql: 9042 + nodeIndex,
+        };
+      }
+    } else {
+      // Fallback to calculated ports
+      const nodeIndex = extractedNodeNumber - 1;
+      ports = {
+        masterUI: 7000 + nodeIndex,
+        tserverUI: 9000 + nodeIndex,
+        yugabytedUI: 15433 + nodeIndex,
+        ysql: 5433 + nodeIndex,
+        ycql: 9042 + nodeIndex,
+      };
+    }
 
     // Check if container is running
     let isRunning = false;
