@@ -145,12 +145,20 @@ export default function Command() {
     fetchReleases();
   }, []);
 
-  async function handleSubmit(values: { name: string; nodes: string; version: string }) {
+  async function handleSubmit(values: { 
+    name: string; 
+    nodes: string; 
+    version: string;
+    masterGFlags?: string;
+    tserverGFlags?: string;
+  }) {
     if (isLoading) return;
 
     const name = values.name.trim();
     const nodes = parseInt(values.nodes, 10);
     const version = values.version.trim() || "latest";
+    const masterGFlags = values.masterGFlags?.trim() || undefined;
+    const tserverGFlags = values.tserverGFlags?.trim() || undefined;
 
     if (!name) {
       await showToast({
@@ -172,9 +180,11 @@ export default function Command() {
 
     setIsLoading(true);
     console.log(`[Create Cluster] Starting creation: name=${name}, nodes=${nodes}, version=${version}`);
+    if (masterGFlags) console.log(`[Create Cluster] Master GFlags: ${masterGFlags}`);
+    if (tserverGFlags) console.log(`[Create Cluster] TServer GFlags: ${tserverGFlags}`);
 
     try {
-      await createYugabyteCluster(name, nodes, version);
+      await createYugabyteCluster(name, nodes, version, masterGFlags, tserverGFlags);
       console.log(`[Create Cluster] Successfully created cluster: ${name}`);
       await showToast({
         style: Toast.Style.Success,
@@ -244,6 +254,21 @@ export default function Command() {
           />
         ))}
       </Form.Dropdown>
+      <Form.Separator />
+      <Form.TextArea
+        id="masterGFlags"
+        title="Master GFlags (Optional)"
+        placeholder="--max_log_size=256 --log_min_seconds_to_retain=3600"
+        defaultValue=""
+        info="Custom GFlags for yb-master. Format: --flag1=value1 --flag2=value2"
+      />
+      <Form.TextArea
+        id="tserverGFlags"
+        title="TServer GFlags (Optional)"
+        placeholder="--max_log_size=256 --log_min_seconds_to_retain=3600"
+        defaultValue=""
+        info="Custom GFlags for yb-tserver. Format: --flag1=value1 --flag2=value2"
+      />
     </Form>
   );
 }

@@ -8,6 +8,8 @@ export interface ClusterInfo {
   nodes: number;
   version: string;
   status: "running" | "stopped";
+  masterGFlags?: string;
+  tserverGFlags?: string;
 }
 
 const CLUSTER_STORAGE_FILE = `${process.env.HOME}/.yugabyte-clusters.json`;
@@ -80,7 +82,9 @@ export async function executeDockerCommand(command: string): Promise<{ stdout: s
 export async function createYugabyteCluster(
   name: string,
   nodes: number,
-  version: string
+  version: string,
+  masterGFlags?: string,
+  tserverGFlags?: string
 ): Promise<void> {
   // Clean up any existing containers with the same name pattern (from previous failed attempts)
   console.log(`[Docker] Cleaning up any existing containers for cluster ${name}...`);
@@ -163,7 +167,7 @@ export async function createYugabyteCluster(
   
   try {
     // Always use yugabyted with custom bridge network
-    await createYugabytedClusterWithHostNetwork(name, nodes, version, createdContainers);
+    await createYugabytedClusterWithHostNetwork(name, nodes, version, createdContainers, masterGFlags, tserverGFlags);
   } catch (error: any) {
     // Rollback: clean up any containers we created
     console.error(`[Docker] Error creating cluster, cleaning up created containers...`);
@@ -193,6 +197,8 @@ export async function createYugabyteCluster(
     nodes,
     version,
     status: "running",
+    masterGFlags,
+    tserverGFlags,
   });
 }
 
@@ -200,7 +206,9 @@ async function createYugabytedClusterWithHostNetwork(
   name: string,
   nodes: number,
   version: string,
-  createdContainers: string[]
+  createdContainers: string[],
+  masterGFlags?: string,
+  tserverGFlags?: string
 ): Promise<void> {
   // Create a custom bridge network for better isolation and connectivity
   const networkName = `yb-${name}-network`;
@@ -256,6 +264,22 @@ async function createYugabytedClusterWithHostNetwork(
     // For nodes after the first, add join flag
     if (joinFlag) {
       yugabytedArgs += ` ${joinFlag}`;
+    }
+    
+    // Add GFlags if provided
+    // yugabyted accepts GFlags via --master_flags and --tserver_flags
+    // Format: --master_flags="--flag1=value1 --flag2=value2"
+    if (masterGFlags && masterGFlags.trim()) {
+      // Escape quotes in GFlags and wrap in quotes
+      const escapedMasterFlags = masterGFlags.trim().replace(/"/g, '\\"');
+      yugabytedArgs += ` --master_flags="${escapedMasterFlags}"`;
+      console.log(`[Docker] Adding master GFlags to node ${i + 1}: ${masterGFlags}`);
+    }
+    if (tserverGFlags && tserverGFlags.trim()) {
+      // Escape quotes in GFlags and wrap in quotes
+      const escapedTserverFlags = tserverGFlags.trim().replace(/"/g, '\\"');
+      yugabytedArgs += ` --tserver_flags="${escapedTserverFlags}"`;
+      console.log(`[Docker] Adding tserver GFlags to node ${i + 1}: ${tserverGFlags}`);
     }
     
     // Create data directory on host if it doesn't exist
@@ -460,6 +484,60 @@ export async function deleteClusterContainers(name: string): Promise<void> {
   const networkName = `yb-${name}-network`;
   await executeDockerCommand(`docker network rm ${networkName} 2>/dev/null || true`);
   await deleteCluster(name);
+}
+
+export async function updateClusterGFlags(
+  name: string,
+  masterGFlags?: string,
+  tserverGFlags?: string
+): Promise<void> {
+  const cluster = await getCluster(name);
+  if (!cluster) {
+    throw new Error(`Cluster "${name}" not found`);
+  }
+
+  if (cluster.status !== "running") {
+    throw new Error(`Cluster "${name}" must be running to update GFlags`);
+  }
+
+  console.log(`[Docker] Updating GFlags for cluster: ${name}`);
+  
+  const containers = await getClusterContainers(name);
+  if (containers.length === 0) {
+    throw new Error(`No containers found for cluster "${name}"`);
+  }
+
+  // Update GFlags for each container
+  for (const containerName of containers) {
+    try {
+      // Check if container is running yugabyted
+      const processCheck = await executeDockerCommand(`docker exec ${containerName} ps aux 2>&1 | grep yugabyted || echo ""`);
+      
+      if (processCheck.stdout && processCheck.stdout.includes("yugabyted")) {
+        console.log(`[Docker] Container ${containerName} uses yugabyted - GFlags update requires restart`);
+        console.log(`[Docker] Note: To apply GFlags changes, you need to recreate the cluster with new GFlags`);
+        throw new Error("GFlags update for yugabyted requires cluster recreation. Please recreate the cluster with new GFlags.");
+      } else {
+        // For separate master/tserver processes, we can update GFlags via yb-admin or config file
+        console.log(`[Docker] Container ${containerName} uses separate processes - GFlags can be updated`);
+        // Note: Updating GFlags for running processes requires restart or using yb-admin
+        // For now, we'll save the GFlags and inform the user
+      }
+    } catch (error: any) {
+      if (error.message && error.message.includes("requires cluster recreation")) {
+        throw error;
+      }
+      console.log(`[Docker] Could not check process type for ${containerName}, continuing...`);
+    }
+  }
+
+  // Save updated GFlags to cluster info
+  await updateClusterStatus(name, cluster.status);
+  const updatedCluster = { ...cluster, masterGFlags, tserverGFlags };
+  await saveCluster(updatedCluster);
+
+  console.log(`[Docker] GFlags updated for cluster: ${name}`);
+  console.log(`[Docker] Note: GFlags changes require container restart to take effect`);
 }
 
 async function getClusterNodes(name: string): Promise<string[]> {

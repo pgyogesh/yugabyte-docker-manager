@@ -1,4 +1,4 @@
-import { Action, ActionPanel, List, showToast, Toast, Icon, open } from "@raycast/api";
+import { Action, ActionPanel, List, showToast, Toast, Icon, open, Form } from "@raycast/api";
 import { useEffect, useState } from "react";
 import {
   getAllClusters,
@@ -7,12 +7,15 @@ import {
   deleteClusterContainers,
   getClusterStatus,
   getClusterServices,
+  updateClusterGFlags,
   ClusterInfo,
 } from "./utils/docker";
 
 export default function Command() {
   const [clusters, setClusters] = useState<ClusterInfo[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [showGFlagsForm, setShowGFlagsForm] = useState(false);
+  const [selectedClusterForGFlags, setSelectedClusterForGFlags] = useState<ClusterInfo | null>(null);
 
   async function loadClusters(showFeedback = false) {
     try {
@@ -165,6 +168,95 @@ export default function Command() {
     }
   }
 
+  async function handleUpdateGFlags(cluster: ClusterInfo, masterGFlags: string, tserverGFlags: string) {
+    try {
+      console.log(`[List Clusters] Updating GFlags for cluster: ${cluster.name}`);
+      await showToast({
+        style: Toast.Style.Animated,
+        title: "Updating GFlags",
+        message: `Updating GFlags for "${cluster.name}"...`,
+      });
+      
+      await updateClusterGFlags(
+        cluster.name,
+        masterGFlags.trim() || undefined,
+        tserverGFlags.trim() || undefined
+      );
+      
+      console.log(`[List Clusters] Successfully updated GFlags for cluster: ${cluster.name}`);
+      await showToast({
+        style: Toast.Style.Success,
+        title: "GFlags Updated",
+        message: `GFlags updated for "${cluster.name}". Restart cluster to apply changes.`,
+      });
+      
+      setShowGFlagsForm(false);
+      setSelectedClusterForGFlags(null);
+      await loadClusters();
+    } catch (error: any) {
+      const errorMsg = error.message || "Unknown error occurred";
+      console.error(`[List Clusters] Error updating GFlags for ${cluster.name}:`, errorMsg);
+      await showToast({
+        style: Toast.Style.Failure,
+        title: "Error updating GFlags",
+        message: errorMsg,
+      });
+    }
+  }
+
+  if (showGFlagsForm && selectedClusterForGFlags) {
+    return (
+      <Form
+        actions={
+          <ActionPanel>
+            <Action.SubmitForm
+              icon={Icon.Checkmark}
+              title="Update GFlags"
+              onSubmit={(values: { masterGFlags: string; tserverGFlags: string }) => {
+                handleUpdateGFlags(
+                  selectedClusterForGFlags,
+                  values.masterGFlags || "",
+                  values.tserverGFlags || ""
+                );
+              }}
+            />
+            <Action
+              icon={Icon.XMark}
+              title="Cancel"
+              onAction={() => {
+                setShowGFlagsForm(false);
+                setSelectedClusterForGFlags(null);
+              }}
+            />
+          </ActionPanel>
+        }
+      >
+        <Form.Description
+          title="Cluster"
+          text={selectedClusterForGFlags.name}
+        />
+        <Form.TextArea
+          id="masterGFlags"
+          title="Master GFlags"
+          placeholder="--max_log_size=256 --log_min_seconds_to_retain=3600"
+          defaultValue={selectedClusterForGFlags.masterGFlags || ""}
+          info="Custom GFlags for yb-master. Format: --flag1=value1 --flag2=value2"
+        />
+        <Form.TextArea
+          id="tserverGFlags"
+          title="TServer GFlags"
+          placeholder="--max_log_size=256 --log_min_seconds_to_retain=3600"
+          defaultValue={selectedClusterForGFlags.tserverGFlags || ""}
+          info="Custom GFlags for yb-tserver. Format: --flag1=value1 --flag2=value2"
+        />
+        <Form.Description
+          title="Note"
+          text="GFlags changes require cluster restart to take effect. For yugabyted clusters, you may need to recreate the cluster."
+        />
+      </Form>
+    );
+  }
+
   return (
     <List isLoading={isLoading}>
       {clusters.length === 0 && !isLoading ? (
@@ -263,6 +355,18 @@ export default function Command() {
                     />
                   </ActionPanel.Section>
                 )}
+
+                <ActionPanel.Section title="Configuration">
+                  <Action
+                    icon={Icon.Gear}
+                    title="Set GFlags"
+                    onAction={() => {
+                      setSelectedClusterForGFlags(cluster);
+                      setShowGFlagsForm(true);
+                    }}
+                    shortcut={{ modifiers: ["cmd"], key: "g" }}
+                  />
+                </ActionPanel.Section>
 
                 <ActionPanel.Section title="Actions">
                   <Action

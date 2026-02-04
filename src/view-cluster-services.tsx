@@ -303,13 +303,17 @@ export default function Command() {
                 <ActionPanel>
                   <ActionPanel.Section title="Copy Connection">
                     <Action.CopyToClipboard
-                      title="Copy Connection String"
-                      content={`psql -h localhost -p ${service.ports.ysql} -U yugabyte`}
+                      title="Copy ysqlsh Command"
+                      content={`docker exec -it ${service.containerName} bin/ysqlsh -h ${service.containerName} -p ${service.ports.ysql}`}
                       shortcut={{ modifiers: ["cmd"], key: "c" }}
                     />
                     <Action.CopyToClipboard
                       title="Copy Host:Port"
                       content={`localhost:${service.ports.ysql}`}
+                    />
+                    <Action.CopyToClipboard
+                      title="Copy psql Command (PostgreSQL client)"
+                      content={`psql -h localhost -p ${service.ports.ysql} -U yugabyte`}
                     />
                   </ActionPanel.Section>
                 </ActionPanel>
@@ -328,13 +332,17 @@ export default function Command() {
                 <ActionPanel>
                   <ActionPanel.Section title="Copy Connection">
                     <Action.CopyToClipboard
-                      title="Copy Connection String"
-                      content={`cqlsh localhost ${service.ports.ycql}`}
+                      title="Copy ycqlsh Command"
+                      content={`docker exec -it ${service.containerName} bin/ycqlsh ${service.containerName} ${service.ports.ycql}`}
                       shortcut={{ modifiers: ["cmd"], key: "c" }}
                     />
                     <Action.CopyToClipboard
                       title="Copy Host:Port"
                       content={`localhost:${service.ports.ycql}`}
+                    />
+                    <Action.CopyToClipboard
+                      title="Copy cqlsh Command (Cassandra client)"
+                      content={`cqlsh localhost ${service.ports.ycql}`}
                     />
                   </ActionPanel.Section>
                 </ActionPanel>
