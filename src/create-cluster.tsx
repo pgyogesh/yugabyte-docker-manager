@@ -11,6 +11,7 @@ export default function Command() {
   const [isLoading, setIsLoading] = useState(false);
   const [releases, setReleases] = useState<YugabyteRelease[]>([]);
   const [isLoadingReleases, setIsLoadingReleases] = useState(true);
+  const [selectedVersion, setSelectedVersion] = useState<string>("latest");
   const toastRef = useRef<Toast | null>(null);
 
   async function fetchReleases() {
@@ -22,7 +23,7 @@ export default function Command() {
       let allTags: any[] = [];
       let nextUrl = "https://hub.docker.com/v2/repositories/yugabytedb/yugabyte/tags?page_size=100&ordering=-last_updated";
       let pageCount = 0;
-      const maxPages = 5; // Fetch up to 5 pages (500 tags)
+      const maxPages = 10; // Fetch up to 10 pages (1000 tags) to ensure we get all versions
       
       while (nextUrl && pageCount < maxPages) {
         const response = await fetch(nextUrl);
@@ -107,11 +108,15 @@ export default function Command() {
         return 0;
       });
       
-      // Limit to top 30 most recent valid releases
-      const topReleases = validReleases.slice(0, 30);
+      // Limit to top 50 most recent valid releases
+      const topReleases = validReleases.slice(0, 50);
       
       setReleases(topReleases);
-      console.log(`[Create Cluster] Found ${topReleases.length} valid releases`);
+      // Update selected version to the first (latest) release if we have releases
+      if (topReleases.length > 0) {
+        setSelectedVersion(topReleases[0].tag);
+      }
+      console.log(`[Create Cluster] Found ${topReleases.length} valid releases (showing top 50)`);
       console.log(`[Create Cluster] Sample releases:`, topReleases.slice(0, 5).map(r => r.tag));
       
       // Show success feedback
@@ -123,7 +128,7 @@ export default function Command() {
     } catch (error: any) {
       console.error("[Create Cluster] Error fetching releases:", error.message || error);
       // Fallback to known good versions
-      setReleases([
+      const fallbackReleases = [
         { name: "Latest", tag: "latest" },
         { name: "2025.2.0.0-b131", tag: "2025.2.0.0-b131" },
         { name: "2.20.0.0", tag: "2.20.0.0" },
@@ -131,7 +136,9 @@ export default function Command() {
         { name: "2.19.2.0", tag: "2.19.2.0" },
         { name: "2.19.1.0", tag: "2.19.1.0" },
         { name: "2.18.4.0", tag: "2.18.4.0" },
-      ]);
+      ];
+      setReleases(fallbackReleases);
+      setSelectedVersion("latest");
       await showToast({
         style: Toast.Style.Failure,
         title: "Could not fetch releases",
@@ -349,7 +356,8 @@ export default function Command() {
       <Form.Dropdown
         id="version"
         title="YugabyteDB Version"
-        defaultValue={releases.length > 0 ? releases[0].tag : "latest"}
+        value={selectedVersion}
+        onChange={setSelectedVersion}
         isLoading={isLoadingReleases}
         info="Select a YugabyteDB version from the list. Press Cmd+R to refresh releases."
       >
