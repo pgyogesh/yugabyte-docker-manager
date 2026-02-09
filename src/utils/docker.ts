@@ -198,7 +198,7 @@ export async function createYugabyteCluster(
   onProgress?.({ stage: "cleanup", message: "Cleaning up existing containers..." });
   try {
     const existing = await executeDockerCommand(
-      `docker ps -a --filter "name=yb-${name}-" --format "{{.Names}}" 2>/dev/null || echo ""`,
+      `docker ps -a --filter "name=^yb-${name}-node" --format "{{.Names}}" 2>/dev/null || echo ""`,
     );
     if (existing.stdout?.trim()) {
       for (const c of existing.stdout.trim().split("\n").filter(Boolean)) {
@@ -442,7 +442,9 @@ async function verifyContainerRunning(nodeName: string): Promise<void> {
 
 async function getClusterContainers(name: string): Promise<string[]> {
   try {
-    const { stdout } = await executeDockerCommand(`docker ps -a --filter "name=yb-${name}-" --format "{{.Names}}"`);
+    const { stdout } = await executeDockerCommand(
+      `docker ps -a --filter "name=^yb-${name}-node" --format "{{.Names}}"`,
+    );
     return stdout
       .split("\n")
       .filter((line) => line.trim().length > 0)
@@ -631,7 +633,9 @@ export async function deleteClusterContainers(name: string): Promise<void> {
 export async function getClusterStatus(name: string): Promise<"running" | "stopped"> {
   let allContainers: string[];
   try {
-    const { stdout } = await executeDockerCommand(`docker ps -a --filter "name=yb-${name}-" --format "{{.Names}}"`);
+    const { stdout } = await executeDockerCommand(
+      `docker ps -a --filter "name=^yb-${name}-node" --format "{{.Names}}"`,
+    );
     allContainers = stdout.split("\n").filter((l) => l.trim().length > 0);
   } catch {
     return "stopped";
@@ -640,7 +644,7 @@ export async function getClusterStatus(name: string): Promise<"running" | "stopp
   if (allContainers.length === 0) return "stopped";
 
   try {
-    const { stdout } = await executeDockerCommand(`docker ps --filter "name=yb-${name}-" --format "{{.Names}}"`);
+    const { stdout } = await executeDockerCommand(`docker ps --filter "name=^yb-${name}-node" --format "{{.Names}}"`);
     const running = stdout.split("\n").filter((l) => l.trim().length > 0);
     return running.length === allContainers.length ? "running" : "stopped";
   } catch {

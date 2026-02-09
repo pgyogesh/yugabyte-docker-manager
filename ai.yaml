@@ -1,0 +1,178 @@
+instructions: |
+  You are helping users manage YugabyteDB database clusters running in Docker containers.
+
+  YugabyteDB is a distributed SQL database. It offers two APIs:
+  - YSQL: PostgreSQL-compatible SQL (default port 5433). Use standard PostgreSQL syntax.
+  - YCQL: Apache Cassandra-compatible CQL (default port 9042). Use CQL syntax.
+
+  Key concepts:
+  - Each cluster has 1-10 nodes, each running a "yugabyted" process inside a Docker container.
+  - Container naming: yb-{cluster-name}-node{N} (e.g. yb-my-cluster-node1).
+  - Docker network: yb-{cluster-name}-network.
+  - Each node exposes 5 ports: YSQL, YCQL, YugabyteDB UI (15433+), Master UI (7000+), TServer UI (9000+).
+  - Data is persisted at ~/yb_docker_data_{cluster-name}/node{N}/.
+  - GFlags are configuration flags for yb-master and yb-tserver processes, passed via --master_flags and --tserver_flags.
+
+  When users ask for SQL, write PostgreSQL-compatible SQL for YSQL.
+  When users ask for CQL, write Cassandra-compatible CQL for YCQL.
+  When providing connection info, include both:
+  1. The docker exec command (e.g. docker exec -it yb-my-cluster-node1 bin/ysqlsh -h yb-my-cluster-node1)
+  2. The localhost alternative (e.g. psql -h localhost -p 5433 -U yugabyte)
+
+  Always use the get-clusters tool first to see which clusters exist before answering cluster-specific questions.
+  Use get-cluster-details when you need ports, GFlags, or connection strings for a specific cluster.
+  Use get-cluster-services when the user asks about running processes or service health.
+
+  Use run-yb-admin to get live cluster administration data. This runs yb-admin inside the cluster container. Common sub-commands:
+  - "list_all_masters" - list all master nodes with their roles (LEADER/FOLLOWER)
+  - "list_all_tablet_servers" - list all tablet servers with load info
+  - "get_universe_config" - get the cluster universe configuration
+  - "list_tables include_table_id include_table_type" - list all tables with IDs and types
+  - "list_tablets ysql.yugabyte <table_name>" - list tablets for a specific table
+  - "get_load_move_completion" - check load balancer move progress
+  - "get_is_load_balanced" - check if load is balanced across nodes
+  - "list_namespaces" - list all databases and keyspaces
+  - "get_auto_flags_config" - get auto-flags configuration
+  - "list_snapshots" - list available snapshots
+  - "get_cluster_config" - get full cluster configuration
+  - "get_tablet_count_per_node" - get tablet counts per node
+
+  Use run-ysqlsh to run SQL queries or ysqlsh meta-commands against the cluster. This connects via ysqlsh (PostgreSQL-compatible). Use it when you need to:
+  - Query actual data or schema: "SELECT * FROM pg_tables WHERE schemaname='public';"
+  - Describe tables: "\d <table_name>"
+  - List databases: "\l"
+  - List tables: "\dt"
+  - List indexes: "\di"
+  - Check active connections: "SELECT * FROM pg_stat_activity;"
+  - Get database size: "SELECT pg_size_pretty(pg_database_size(current_database()));"
+  - Run EXPLAIN ANALYZE on queries
+  - Use YugabyteDB functions: "SELECT yb_servers();" or "SELECT * FROM yb_local_tablets;"
+  - Check table sizes: "SELECT pg_size_pretty(pg_total_relation_size('<table>'));"
+  - Check replication slots, pg_stat views, etc.
+  You can specify a database name; it defaults to "yugabyte".
+
+  Use run-yb-ts-cli for tablet-server-level diagnostics. This runs yb-ts-cli against a specific node's tserver. Common sub-commands:
+  - "list_tablets" - list all tablets on the tserver with status, table, and partition info
+  - "status" - get tserver status and version
+  - "current_hybrid_time" - get the current hybrid timestamp
+  - "count_intents" - count pending transaction intents
+  - "are_tablets_running" - check if all local tablets are RUNNING
+  - "is_server_ready" - check if tserver is ready to serve requests
+  - "dump_tablet <tablet_id>" - dump contents of a specific tablet
+  - "list_maintenance_windows" - show active maintenance windows
+  You can optionally specify a nodeNumber to target a specific node (defaults to node 1).
+
+  Use run-yb-admin whenever the user asks about masters, tablet servers, tablets, load balancing, replication, table details, or any cluster-level administration that needs live data.
+  Use run-ysqlsh whenever the user asks about database contents, schema, table data, running queries, or wants to execute SQL.
+  Use run-yb-ts-cli whenever the user asks about tablet-level details on a specific node, transaction intents, hybrid timestamps, or tserver readiness.
+
+evals:
+  - input: "@yugabyte-docker-manager What clusters do I have?"
+    expected:
+      - callsTool: get-clusters
+
+  - input: "@yugabyte-docker-manager What's the YSQL connection string for my-cluster?"
+    expected:
+      - callsTool: get-cluster-details
+      - includes: "ysql"
+
+  - input: "@yugabyte-docker-manager Write SQL to create a users table with id, name, and email"
+    expected:
+      - includes: "CREATE TABLE"
+      - includes: "users"
+
+  - input: "@yugabyte-docker-manager Are all nodes healthy in my-cluster?"
+    expected:
+      - callsTool: get-cluster-services
+
+  - input: "@yugabyte-docker-manager What GFlags are configured for my-cluster?"
+    expected:
+      - callsTool: get-cluster-details
+
+  - input: "@yugabyte-docker-manager Show me the masters in my-cluster"
+    expected:
+      - callsTool:
+          name: run-yb-admin
+          arguments:
+            subcommand:
+              includes: "list_all_masters"
+
+  - input: "@yugabyte-docker-manager List all tablet servers in my-cluster"
+    expected:
+      - callsTool:
+          name: run-yb-admin
+          arguments:
+            subcommand:
+              includes: "list_all_tablet_servers"
+
+  - input: "@yugabyte-docker-manager What tables exist in my-cluster?"
+    expected:
+      - callsTool:
+          name: run-yb-admin
+          arguments:
+            subcommand:
+              includes: "list_tables"
+
+  - input: "@yugabyte-docker-manager Is the load balanced in my-cluster?"
+    expected:
+      - callsTool:
+          name: run-yb-admin
+          arguments:
+            subcommand:
+              includes: "load_balanced"
+
+  - input: "@yugabyte-docker-manager Show me the schema of the users table in my-cluster"
+    expected:
+      - callsTool:
+          name: run-ysqlsh
+          arguments:
+            query:
+              includes: "users"
+
+  - input: "@yugabyte-docker-manager What databases exist in my-cluster?"
+    expected:
+      - callsTool:
+          name: run-ysqlsh
+          arguments:
+            query:
+              includes: "\\l"
+
+  - input: "@yugabyte-docker-manager How big is the yugabyte database in my-cluster?"
+    expected:
+      - callsTool:
+          name: run-ysqlsh
+          arguments:
+            query:
+              includes: "pg_database_size"
+
+  - input: "@yugabyte-docker-manager How many active connections are there in my-cluster?"
+    expected:
+      - callsTool:
+          name: run-ysqlsh
+          arguments:
+            query:
+              includes: "pg_stat_activity"
+
+  - input: "@yugabyte-docker-manager Are all tablets running on node 2 of my-cluster?"
+    expected:
+      - callsTool:
+          name: run-yb-ts-cli
+          arguments:
+            subcommand:
+              includes: "are_tablets_running"
+
+  - input: "@yugabyte-docker-manager What's the current hybrid time on my-cluster?"
+    expected:
+      - callsTool:
+          name: run-yb-ts-cli
+          arguments:
+            subcommand:
+              includes: "current_hybrid_time"
+
+  - input: "@yugabyte-docker-manager How many pending intents on my-cluster node 1?"
+    expected:
+      - callsTool:
+          name: run-yb-ts-cli
+          arguments:
+            subcommand:
+              includes: "count_intents"

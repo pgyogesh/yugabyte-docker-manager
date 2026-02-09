@@ -49,6 +49,41 @@
       "keywords": ["yugabyte", "services", "ports", "ysql", "ycql", "ui", "connect"]
     }
   ],
+  "tools": [
+    {
+      "name": "get-clusters",
+      "title": "Get Clusters",
+      "description": "Get a list of all YugabyteDB clusters with their status, version, and node count"
+    },
+    {
+      "name": "get-cluster-details",
+      "title": "Get Cluster Details",
+      "description": "Get detailed configuration for a specific cluster including ports, GFlags, and connection strings"
+    },
+    {
+      "name": "get-cluster-services",
+      "title": "Get Cluster Services",
+      "description": "Get live service status for each node in a cluster including running processes"
+    },
+    {
+      "name": "run-yb-admin",
+      "title": "Run Yb-Admin Command",
+      "description": "Run a yb-admin command inside a YugabyteDB cluster to get live admin details like master/tserver lists, tablets, tables, load balancer status, universe config, and more"
+    },
+    {
+      "name": "run-ysqlsh",
+      "title": "Run Ysqlsh Query",
+      "description": "Run a SQL query or ysqlsh meta-command against a YugabyteDB cluster to inspect schema, query data, check catalog views, and run YugabyteDB functions"
+    },
+    {
+      "name": "run-yb-ts-cli",
+      "title": "Run Yb-Ts-Cli Command",
+      "description": "Run a yb-ts-cli command on a YugabyteDB tablet server node for diagnostics like listing tablets, checking server readiness, hybrid time, and intent counts"
+    }
+  ],
+  "ai": {
+    "instructions": "file:ai.yaml"
+  },
   "dependencies": {
     "@raycast/api": "^1.104.4",
     "@raycast/utils": "^1.17.0"
