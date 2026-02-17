@@ -65,7 +65,7 @@ export default function Command() {
         });
 
         try {
-          await launchCommand({ name: "list-clusters", type: LaunchType.UserInitiated });
+          await launchCommand({ name: "manage-clusters", type: LaunchType.UserInitiated });
         } catch {
           // User can navigate manually
         }

@@ -52,8 +52,11 @@ export default async function tool(input: Input) {
   }
 
   const containerName = `yb-${input.clusterName}-node1`;
-  // yb-admin needs the master addresses; in yugabyted mode, master runs on the same node at port 7100
-  const masterAddresses = `${containerName}:7100`;
+  // Build comma-separated master addresses for all nodes (each runs a master on internal port 7100)
+  const totalNodes = cluster.nodes ?? 1;
+  const masterAddresses = Array.from({ length: totalNodes }, (_, i) => `yb-${input.clusterName}-node${i + 1}:7100`).join(
+    ",",
+  );
 
   const cmd = `docker exec ${containerName} /home/yugabyte/bin/yb-admin -master_addresses ${masterAddresses} ${input.subcommand}`;
 

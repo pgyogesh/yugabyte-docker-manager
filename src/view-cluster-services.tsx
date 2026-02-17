@@ -1,8 +1,9 @@
 import { Action, ActionPanel, List, Icon, Color, showToast, Toast } from "@raycast/api";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { useClusters } from "./hooks/useClusters";
 import { useClusterServices } from "./hooks/useClusterServices";
 import { openInTerminal } from "./utils/terminal";
+import { ClusterService } from "./types";
 
 interface ViewClusterServicesProps {
   initialClusterName?: string;
@@ -42,8 +43,9 @@ export default function Command({ initialClusterName }: ViewClusterServicesProps
   return (
     <List
       isLoading={isLoading}
+      isShowingDetail
       navigationTitle="Cluster Services"
-      searchBarPlaceholder="Search services..."
+      searchBarPlaceholder="Search nodes..."
       searchBarAccessory={
         clusters.length > 0 ? (
           <List.Dropdown tooltip="Select Cluster" value={selectedCluster || ""} onChange={setSelectedCluster}>
@@ -72,60 +74,12 @@ export default function Command({ initialClusterName }: ViewClusterServicesProps
         />
       ) : (
         services.map((service) => (
-          <List.Section key={service.containerName} title={`Node ${service.nodeNumber} (${service.containerName})`}>
-            {/* YugabyteDB UI */}
-            {service.services.yugabyted && (
-              <ServiceItem
-                title="YugabyteDB UI"
-                port={service.ports.yugabytedUI}
-                running={service.services.yugabyted.running}
-                url={`http://localhost:${service.ports.yugabytedUI}`}
-                onRefresh={revalidate}
-              />
-            )}
-
-            {/* Master UI */}
-            {service.services.ybMaster && (
-              <ServiceItem
-                title="Master Web UI"
-                port={service.ports.masterUI}
-                running={service.services.ybMaster.running}
-                url={`http://localhost:${service.ports.masterUI}`}
-                onRefresh={revalidate}
-              />
-            )}
-
-            {/* TServer UI */}
-            {service.services.ybTserver && (
-              <ServiceItem
-                title="TServer Web UI"
-                port={service.ports.tserverUI}
-                running={service.services.ybTserver.running}
-                url={`http://localhost:${service.ports.tserverUI}`}
-                onRefresh={revalidate}
-              />
-            )}
-
-            {/* YSQL Endpoint */}
-            <DatabaseEndpointItem
-              title="YSQL Endpoint"
-              subtitle="PostgreSQL-compatible"
-              port={service.ports.ysql}
-              containerName={service.containerName}
-              protocol="ysql"
-              onRefresh={revalidate}
-            />
-
-            {/* YCQL Endpoint */}
-            <DatabaseEndpointItem
-              title="YCQL Endpoint"
-              subtitle="Cassandra-compatible"
-              port={service.ports.ycql}
-              containerName={service.containerName}
-              protocol="ycql"
-              onRefresh={revalidate}
-            />
-          </List.Section>
+          <NodeServiceItem
+            key={service.containerName}
+            service={service}
+            clusterName={selectedCluster ?? ""}
+            onRefresh={revalidate}
+          />
         ))
       )}
     </List>
@@ -133,116 +87,190 @@ export default function Command({ initialClusterName }: ViewClusterServicesProps
 }
 
 // ---------------------------------------------------------------------------
-// Sub-components
+// Node list item with detail pane
 // ---------------------------------------------------------------------------
 
-function ServiceItem({
-  title,
-  port,
-  running,
-  url,
+function NodeServiceItem({
+  service,
+  clusterName,
   onRefresh,
 }: {
-  title: string;
-  port: number;
-  running: boolean;
-  url: string;
+  service: ClusterService;
+  clusterName: string;
   onRefresh: () => void;
 }) {
-  const statusIcon = running
-    ? { source: Icon.CircleFilled, tintColor: Color.Green }
-    : { source: Icon.Circle, tintColor: Color.SecondaryText };
+  const allRunning =
+    service.services.yugabyted?.running && service.services.ybMaster?.running && service.services.ybTserver?.running;
+  const anyRunning =
+    service.services.yugabyted?.running || service.services.ybMaster?.running || service.services.ybTserver?.running;
 
-  return (
-    <List.Item
-      title={title}
-      subtitle={`Port ${port}`}
-      icon={statusIcon}
-      accessories={[{ text: url }]}
-      actions={
-        <ActionPanel>
-          <Action.OpenInBrowser title="Open in Browser" url={url} />
-          <Action.CopyToClipboard title="Copy URL" content={url} shortcut={{ modifiers: ["cmd"], key: "c" }} />
-          <Action
-            icon={Icon.ArrowClockwise}
-            title="Refresh"
-            onAction={onRefresh}
-            shortcut={{ modifiers: ["cmd"], key: "r" }}
-          />
-        </ActionPanel>
+  const statusColor = allRunning ? Color.Green : anyRunning ? Color.Orange : Color.SecondaryText;
+  const statusText = allRunning ? "Healthy" : anyRunning ? "Degraded" : "Stopped";
+
+  const ysqlDockerCmd = `docker exec -it ${service.containerName} bin/ysqlsh -h ${service.containerName}`;
+  const ycqlDockerCmd = `docker exec -it ${service.containerName} bin/ycqlsh ${service.containerName}`;
+  const bashDockerCmd = `docker exec -it ${service.containerName} /bin/bash`;
+  const ysqlLocalCmd = `psql -h localhost -p ${service.ports.ysql} -U yugabyte`;
+  const ycqlLocalCmd = `cqlsh localhost ${service.ports.ycql}`;
+
+  const handleOpenTerminal = useCallback(
+    async (protocol: "ysql" | "ycql") => {
+      const cmd = protocol === "ysql" ? ysqlDockerCmd : ycqlDockerCmd;
+      const label = `${protocol.toUpperCase()} · ${clusterName}`;
+      try {
+        const terminalUsed = await openInTerminal(cmd, label);
+        await showToast({
+          style: Toast.Style.Success,
+          title: `Opening ${protocol === "ysql" ? "ysqlsh" : "ycqlsh"}`,
+          message: `Connecting via ${terminalUsed}...`,
+        });
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : "Could not open shell";
+        await showToast({ style: Toast.Style.Failure, title: "Error", message: msg });
       }
-    />
+    },
+    [ysqlDockerCmd, ycqlDockerCmd, clusterName],
   );
-}
-
-function DatabaseEndpointItem({
-  title,
-  subtitle,
-  port,
-  containerName,
-  protocol,
-  onRefresh,
-}: {
-  title: string;
-  subtitle: string;
-  port: number;
-  containerName: string;
-  protocol: "ysql" | "ycql";
-  onRefresh: () => void;
-}) {
-  const shellBinary = protocol === "ysql" ? "ysqlsh" : "ycqlsh";
-  const dockerCommand =
-    protocol === "ysql"
-      ? `docker exec -it ${containerName} bin/ysqlsh -h ${containerName}`
-      : `docker exec -it ${containerName} bin/ycqlsh ${containerName}`;
-  const copyCommand =
-    protocol === "ysql"
-      ? `docker exec -it ${containerName} bin/ysqlsh -h ${containerName} -p ${port}`
-      : `docker exec -it ${containerName} bin/ycqlsh ${containerName} ${port}`;
-  const clientCommand = protocol === "ysql" ? `psql -h localhost -p ${port} -U yugabyte` : `cqlsh localhost ${port}`;
 
   return (
     <List.Item
-      title={title}
-      subtitle={`${subtitle} · Port ${port}`}
-      icon={Icon.Terminal}
-      accessories={[{ text: `localhost:${port}` }]}
+      title={`Node ${service.nodeNumber}`}
+      subtitle={service.containerName}
+      icon={{ source: Icon.ComputerChip, tintColor: statusColor }}
+      accessories={[{ tag: { value: statusText, color: statusColor } }]}
+      detail={
+        <List.Item.Detail
+          metadata={
+            <List.Item.Detail.Metadata>
+              {/* Status Overview */}
+              <List.Item.Detail.Metadata.Label title="Container" text={service.containerName} icon={Icon.Box} />
+              <List.Item.Detail.Metadata.Label
+                title="Status"
+                text={statusText}
+                icon={{ source: Icon.CircleFilled, tintColor: statusColor }}
+              />
+
+              <List.Item.Detail.Metadata.Separator />
+
+              {/* Processes */}
+              <List.Item.Detail.Metadata.Label title="Processes" />
+              <ProcessLabel title="  yugabyted" running={service.services.yugabyted?.running ?? false} />
+              <ProcessLabel title="  yb-master" running={service.services.ybMaster?.running ?? false} />
+              <ProcessLabel title="  yb-tserver" running={service.services.ybTserver?.running ?? false} />
+
+              <List.Item.Detail.Metadata.Separator />
+
+              {/* Web UIs */}
+              <List.Item.Detail.Metadata.Label title="Web UIs" />
+              {anyRunning ? (
+                <>
+                  <List.Item.Detail.Metadata.Link
+                    title="  YugabyteDB UI"
+                    target={`http://localhost:${service.ports.yugabytedUI}`}
+                    text={`localhost:${service.ports.yugabytedUI}`}
+                  />
+                  <List.Item.Detail.Metadata.Link
+                    title="  Master UI"
+                    target={`http://localhost:${service.ports.masterUI}`}
+                    text={`localhost:${service.ports.masterUI}`}
+                  />
+                  <List.Item.Detail.Metadata.Link
+                    title="  TServer UI"
+                    target={`http://localhost:${service.ports.tserverUI}`}
+                    text={`localhost:${service.ports.tserverUI}`}
+                  />
+                </>
+              ) : (
+                <List.Item.Detail.Metadata.Label title="  —" text="Node is stopped" />
+              )}
+
+              <List.Item.Detail.Metadata.Separator />
+
+              {/* Database Ports */}
+              <List.Item.Detail.Metadata.Label title="Database Ports" />
+              <List.Item.Detail.Metadata.Label
+                title="  YSQL (PostgreSQL)"
+                text={`localhost:${service.ports.ysql}`}
+                icon={Icon.Terminal}
+              />
+              <List.Item.Detail.Metadata.Label
+                title="  YCQL (Cassandra)"
+                text={`localhost:${service.ports.ycql}`}
+                icon={Icon.Terminal}
+              />
+
+              <List.Item.Detail.Metadata.Separator />
+
+              {/* Connection Strings */}
+              <List.Item.Detail.Metadata.Label title="Connection Strings" />
+              <List.Item.Detail.Metadata.Label title="  bash (docker)" text={bashDockerCmd} />
+              <List.Item.Detail.Metadata.Label title="  ysqlsh (docker)" text={ysqlDockerCmd} />
+              <List.Item.Detail.Metadata.Label title="  psql (local)" text={ysqlLocalCmd} />
+              <List.Item.Detail.Metadata.Label title="  ycqlsh (docker)" text={ycqlDockerCmd} />
+              <List.Item.Detail.Metadata.Label title="  cqlsh (local)" text={ycqlLocalCmd} />
+            </List.Item.Detail.Metadata>
+          }
+        />
+      }
       actions={
         <ActionPanel>
+          {/* Connect */}
           <ActionPanel.Section title="Connect">
             <Action
               icon={Icon.Terminal}
-              title={`Open ${shellBinary} in Terminal`}
-              onAction={async () => {
-                try {
-                  const terminalUsed = await openInTerminal(
-                    dockerCommand,
-                    `${protocol.toUpperCase()} · ${containerName}`,
-                  );
-                  await showToast({
-                    style: Toast.Style.Success,
-                    title: `Opening ${shellBinary}`,
-                    message: `Connecting via ${terminalUsed}...`,
-                  });
-                } catch (err: unknown) {
-                  const msg = err instanceof Error ? err.message : "Could not open shell";
-                  await showToast({ style: Toast.Style.Failure, title: "Error", message: msg });
-                }
-              }}
+              title="Open YSQL Shell"
+              onAction={() => handleOpenTerminal("ysql")}
+              shortcut={{ modifiers: ["cmd", "shift"], key: "y" }}
+            />
+            <Action
+              icon={Icon.Terminal}
+              title="Open YCQL Shell"
+              onAction={() => handleOpenTerminal("ycql")}
+              shortcut={{ modifiers: ["cmd", "shift"], key: "c" }}
             />
           </ActionPanel.Section>
+
+          {/* Web UIs */}
+          {anyRunning && (
+            <ActionPanel.Section title="Web UIs">
+              <Action.OpenInBrowser
+                title="Open YugabyteDB UI"
+                url={`http://localhost:${service.ports.yugabytedUI}`}
+                shortcut={{ modifiers: ["cmd"], key: "u" }}
+              />
+              <Action.OpenInBrowser
+                title="Open Master UI"
+                url={`http://localhost:${service.ports.masterUI}`}
+                shortcut={{ modifiers: ["cmd"], key: "m" }}
+              />
+              <Action.OpenInBrowser
+                title="Open TServer UI"
+                url={`http://localhost:${service.ports.tserverUI}`}
+                shortcut={{ modifiers: ["cmd"], key: "t" }}
+              />
+            </ActionPanel.Section>
+          )}
+
+          {/* Copy */}
           <ActionPanel.Section title="Copy Connection">
             <Action.CopyToClipboard
-              title={`Copy ${shellBinary} Command`}
-              content={copyCommand}
+              title="Copy Bash Command"
+              content={bashDockerCmd}
+              shortcut={{ modifiers: ["cmd", "shift"], key: "b" }}
+            />
+            <Action.CopyToClipboard
+              title="Copy YSQL Docker Command"
+              content={ysqlDockerCmd}
               shortcut={{ modifiers: ["cmd"], key: "c" }}
             />
-            <Action.CopyToClipboard title="Copy Host:Port" content={`localhost:${port}`} />
-            <Action.CopyToClipboard
-              title={`Copy ${protocol === "ysql" ? "psql" : "cqlsh"} Command`}
-              content={clientCommand}
-            />
+            <Action.CopyToClipboard title="Copy YSQL Local Command" content={ysqlLocalCmd} />
+            <Action.CopyToClipboard title="Copy YCQL Docker Command" content={ycqlDockerCmd} />
+            <Action.CopyToClipboard title="Copy YCQL Local Command" content={ycqlLocalCmd} />
+            <Action.CopyToClipboard title="Copy YSQL Host:Port" content={`localhost:${service.ports.ysql}`} />
+            <Action.CopyToClipboard title="Copy YCQL Host:Port" content={`localhost:${service.ports.ycql}`} />
           </ActionPanel.Section>
+
+          {/* Refresh */}
           <ActionPanel.Section>
             <Action
               icon={Icon.ArrowClockwise}
@@ -253,6 +281,23 @@ function DatabaseEndpointItem({
           </ActionPanel.Section>
         </ActionPanel>
       }
+    />
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Helper: process status label
+// ---------------------------------------------------------------------------
+
+function ProcessLabel({ title, running }: { title: string; running: boolean }) {
+  return (
+    <List.Item.Detail.Metadata.Label
+      title={title}
+      text={running ? "Running" : "Stopped"}
+      icon={{
+        source: running ? Icon.CircleFilled : Icon.Circle,
+        tintColor: running ? Color.Green : Color.SecondaryText,
+      }}
     />
   );
 }

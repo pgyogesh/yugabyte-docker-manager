@@ -35,9 +35,9 @@
       "keywords": ["yugabyte", "database", "docker", "create", "postgresql", "cassandra", "new"]
     },
     {
-      "name": "list-clusters",
-      "title": "List Clusters",
-      "description": "List all YugabyteDB clusters with options to start, stop, or delete",
+      "name": "manage-clusters",
+      "title": "Manage Clusters",
+      "description": "Manage all YugabyteDB clusters with options to start, stop, scale, or delete",
       "mode": "view",
       "keywords": ["yugabyte", "database", "docker", "cluster", "manage", "start", "stop"]
     },
