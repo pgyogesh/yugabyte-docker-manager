@@ -2,6 +2,7 @@ import { Action, ActionPanel, List, Icon, Color, showToast, Toast } from "@rayca
 import { useState, useEffect, useCallback } from "react";
 import { useClusters } from "./hooks/useClusters";
 import { useClusterServices } from "./hooks/useClusterServices";
+import { useProxy } from "./hooks/useProxy";
 import { openInTerminal } from "./utils/terminal";
 import { ClusterService } from "./types";
 
@@ -13,6 +14,7 @@ export default function Command({ initialClusterName }: ViewClusterServicesProps
   const { clusters, isLoading: isLoadingClusters } = useClusters();
   const [selectedCluster, setSelectedCluster] = useState<string | null>(initialClusterName ?? null);
   const { services, isLoading: isLoadingServices, revalidate } = useClusterServices(selectedCluster);
+  const { proxyRunning, proxyUrl } = useProxy();
 
   // Auto-select first cluster if none selected
   useEffect(() => {
@@ -78,6 +80,7 @@ export default function Command({ initialClusterName }: ViewClusterServicesProps
             key={service.containerName}
             service={service}
             clusterName={selectedCluster ?? ""}
+            proxyUrl={proxyRunning ? proxyUrl : null}
             onRefresh={revalidate}
           />
         ))
@@ -93,10 +96,12 @@ export default function Command({ initialClusterName }: ViewClusterServicesProps
 function NodeServiceItem({
   service,
   clusterName,
+  proxyUrl,
   onRefresh,
 }: {
   service: ClusterService;
   clusterName: string;
+  proxyUrl: string | null;
   onRefresh: () => void;
 }) {
   const allRunning =
@@ -112,6 +117,13 @@ function NodeServiceItem({
   const bashDockerCmd = `docker exec -it ${service.containerName} /bin/bash`;
   const ysqlLocalCmd = `psql -h localhost -p ${service.ports.ysql} -U yugabyte`;
   const ycqlLocalCmd = `cqlsh localhost ${service.ports.ycql}`;
+
+  // Proxy URLs use the container-internal ports (7000, 9000, 15433, 7100, 9100)
+  const proxyMasterUrl = proxyUrl ? `${proxyUrl}/proxy/${service.containerName}:7000/` : null;
+  const proxyTserverUrl = proxyUrl ? `${proxyUrl}/proxy/${service.containerName}:9000/` : null;
+  const proxyYugabytedUrl = proxyUrl ? `${proxyUrl}/proxy/${service.containerName}:15433/` : null;
+  const proxyMasterRpcUrl = proxyUrl ? `${proxyUrl}/proxy/${service.containerName}:7100/` : null;
+  const proxyTserverRpcUrl = proxyUrl ? `${proxyUrl}/proxy/${service.containerName}:9100/` : null;
 
   const handleOpenTerminal = useCallback(
     async (protocol: "ysql" | "ycql") => {
@@ -160,8 +172,50 @@ function NodeServiceItem({
 
               <List.Item.Detail.Metadata.Separator />
 
-              {/* Web UIs */}
-              <List.Item.Detail.Metadata.Label title="Web UIs" />
+              {/* Web UIs — proxy first (default) */}
+              {proxyUrl && anyRunning && (
+                <>
+                  <List.Item.Detail.Metadata.Label
+                    title="Web UIs (via Proxy)"
+                    icon={{ source: Icon.Globe, tintColor: Color.Blue }}
+                  />
+                  {proxyMasterUrl && (
+                    <List.Item.Detail.Metadata.Link title="  Master UI" target={proxyMasterUrl} text="proxy → :7000" />
+                  )}
+                  {proxyTserverUrl && (
+                    <List.Item.Detail.Metadata.Link
+                      title="  TServer UI"
+                      target={proxyTserverUrl}
+                      text="proxy → :9000"
+                    />
+                  )}
+                  {proxyYugabytedUrl && (
+                    <List.Item.Detail.Metadata.Link
+                      title="  YugabyteDB UI"
+                      target={proxyYugabytedUrl}
+                      text="proxy → :15433"
+                    />
+                  )}
+                  {proxyMasterRpcUrl && (
+                    <List.Item.Detail.Metadata.Link
+                      title="  Master RPC UI"
+                      target={proxyMasterRpcUrl}
+                      text="proxy → :7100"
+                    />
+                  )}
+                  {proxyTserverRpcUrl && (
+                    <List.Item.Detail.Metadata.Link
+                      title="  TServer RPC UI"
+                      target={proxyTserverRpcUrl}
+                      text="proxy → :9100"
+                    />
+                  )}
+                  <List.Item.Detail.Metadata.Separator />
+                </>
+              )}
+
+              {/* Direct Web UIs */}
+              <List.Item.Detail.Metadata.Label title={proxyUrl ? "Web UIs (Direct)" : "Web UIs"} />
               {anyRunning ? (
                 <>
                   <List.Item.Detail.Metadata.Link
@@ -230,23 +284,58 @@ function NodeServiceItem({
             />
           </ActionPanel.Section>
 
-          {/* Web UIs */}
-          {anyRunning && (
-            <ActionPanel.Section title="Web UIs">
-              <Action.OpenInBrowser
-                title="Open YugabyteDB UI"
-                url={`http://localhost:${service.ports.yugabytedUI}`}
-                shortcut={{ modifiers: ["cmd"], key: "u" }}
-              />
+          {/* Web UIs via Proxy (default) */}
+          {proxyUrl && anyRunning && (
+            <ActionPanel.Section title="Web UIs (via Proxy)">
               <Action.OpenInBrowser
                 title="Open Master UI"
-                url={`http://localhost:${service.ports.masterUI}`}
+                url={proxyMasterUrl!}
+                icon={{ source: Icon.Globe, tintColor: Color.Blue }}
                 shortcut={{ modifiers: ["cmd"], key: "m" }}
               />
               <Action.OpenInBrowser
                 title="Open TServer UI"
-                url={`http://localhost:${service.ports.tserverUI}`}
+                url={proxyTserverUrl!}
+                icon={{ source: Icon.Globe, tintColor: Color.Blue }}
                 shortcut={{ modifiers: ["cmd"], key: "t" }}
+              />
+              <Action.OpenInBrowser
+                title="Open YugabyteDB UI"
+                url={proxyYugabytedUrl!}
+                icon={{ source: Icon.Globe, tintColor: Color.Blue }}
+                shortcut={{ modifiers: ["cmd"], key: "u" }}
+              />
+              <Action.OpenInBrowser
+                title="Open Master RPC UI"
+                url={proxyMasterRpcUrl!}
+                icon={{ source: Icon.Globe, tintColor: Color.Blue }}
+              />
+              <Action.OpenInBrowser
+                title="Open TServer RPC UI"
+                url={proxyTserverRpcUrl!}
+                icon={{ source: Icon.Globe, tintColor: Color.Blue }}
+              />
+              <Action.OpenInBrowser title="Open Proxy Landing Page" url={proxyUrl!} icon={Icon.Link} />
+            </ActionPanel.Section>
+          )}
+
+          {/* Direct Web UIs (fallback / secondary) */}
+          {anyRunning && (
+            <ActionPanel.Section title={proxyUrl ? "Web UIs (Direct)" : "Web UIs"}>
+              <Action.OpenInBrowser
+                title={proxyUrl ? "Open YugabyteDB UI (Direct)" : "Open YugabyteDB UI"}
+                url={`http://localhost:${service.ports.yugabytedUI}`}
+                shortcut={proxyUrl ? undefined : { modifiers: ["cmd"], key: "u" }}
+              />
+              <Action.OpenInBrowser
+                title={proxyUrl ? "Open Master UI (Direct)" : "Open Master UI"}
+                url={`http://localhost:${service.ports.masterUI}`}
+                shortcut={proxyUrl ? undefined : { modifiers: ["cmd"], key: "m" }}
+              />
+              <Action.OpenInBrowser
+                title={proxyUrl ? "Open TServer UI (Direct)" : "Open TServer UI"}
+                url={`http://localhost:${service.ports.tserverUI}`}
+                shortcut={proxyUrl ? undefined : { modifiers: ["cmd"], key: "t" }}
               />
             </ActionPanel.Section>
           )}

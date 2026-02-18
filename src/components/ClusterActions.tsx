@@ -1,10 +1,11 @@
-import { Action, ActionPanel, Icon, confirmAlert, Alert, launchCommand, LaunchType } from "@raycast/api";
+import { Action, ActionPanel, Icon, Color, confirmAlert, Alert, launchCommand, LaunchType } from "@raycast/api";
 import { ClusterInfo } from "../types";
 import { openInTerminal } from "../utils/terminal";
 import { ScaleClusterForm } from "./ScaleClusterForm";
 
 interface ClusterActionsProps {
   cluster: ClusterInfo;
+  proxyUrl: string | null;
   onStart: () => void;
   onStop: () => void;
   onRestart: () => void;
@@ -18,6 +19,7 @@ interface ClusterActionsProps {
 
 export function ClusterActions({
   cluster,
+  proxyUrl,
   onStart,
   onStop,
   onRestart,
@@ -61,23 +63,36 @@ export function ClusterActions({
         )}
       </ActionPanel.Section>
 
-      {/* Web UIs */}
-      {isRunning && firstNodePorts && (
-        <ActionPanel.Section title="Web UIs">
-          <Action.OpenInBrowser
-            title="Open YugabyteDB UI"
-            url={`http://localhost:${firstNodePorts.yugabytedUI}`}
-            shortcut={{ modifiers: ["cmd"], key: "u" }}
-          />
+      {/* Web UIs via Proxy (default) */}
+      {isRunning && proxyUrl && (
+        <ActionPanel.Section title="Web UIs (via Proxy)">
           <Action.OpenInBrowser
             title="Open Master UI"
-            url={`http://localhost:${firstNodePorts.masterUI}`}
+            url={`${proxyUrl}/proxy/${firstContainerName}:7000/`}
+            icon={{ source: Icon.Globe, tintColor: Color.Blue }}
             shortcut={{ modifiers: ["cmd"], key: "m" }}
           />
           <Action.OpenInBrowser
             title="Open TServer UI"
-            url={`http://localhost:${firstNodePorts.tserverUI}`}
+            url={`${proxyUrl}/proxy/${firstContainerName}:9000/`}
+            icon={{ source: Icon.Globe, tintColor: Color.Blue }}
             shortcut={{ modifiers: ["cmd"], key: "t" }}
+          />
+          <Action.OpenInBrowser
+            title="Open YugabyteDB UI"
+            url={`${proxyUrl}/proxy/${firstContainerName}:15433/`}
+            icon={{ source: Icon.Globe, tintColor: Color.Blue }}
+            shortcut={{ modifiers: ["cmd"], key: "u" }}
+          />
+          <Action.OpenInBrowser
+            title="Open Master RPC UI"
+            url={`${proxyUrl}/proxy/${firstContainerName}:7100/`}
+            icon={{ source: Icon.Globe, tintColor: Color.Blue }}
+          />
+          <Action.OpenInBrowser
+            title="Open TServer RPC UI"
+            url={`${proxyUrl}/proxy/${firstContainerName}:9100/`}
+            icon={{ source: Icon.Globe, tintColor: Color.Blue }}
           />
           <Action
             icon={Icon.AppWindowList}
@@ -85,6 +100,35 @@ export function ClusterActions({
             onAction={onViewServices}
             shortcut={{ modifiers: ["cmd"], key: "v" }}
           />
+        </ActionPanel.Section>
+      )}
+
+      {/* Direct Web UIs (fallback / secondary) */}
+      {isRunning && firstNodePorts && (
+        <ActionPanel.Section title={proxyUrl ? "Web UIs (Direct)" : "Web UIs"}>
+          <Action.OpenInBrowser
+            title={proxyUrl ? "Open YugabyteDB UI (Direct)" : "Open YugabyteDB UI"}
+            url={`http://localhost:${firstNodePorts.yugabytedUI}`}
+            shortcut={proxyUrl ? undefined : { modifiers: ["cmd"], key: "u" }}
+          />
+          <Action.OpenInBrowser
+            title={proxyUrl ? "Open Master UI (Direct)" : "Open Master UI"}
+            url={`http://localhost:${firstNodePorts.masterUI}`}
+            shortcut={proxyUrl ? undefined : { modifiers: ["cmd"], key: "m" }}
+          />
+          <Action.OpenInBrowser
+            title={proxyUrl ? "Open TServer UI (Direct)" : "Open TServer UI"}
+            url={`http://localhost:${firstNodePorts.tserverUI}`}
+            shortcut={proxyUrl ? undefined : { modifiers: ["cmd"], key: "t" }}
+          />
+          {!proxyUrl && (
+            <Action
+              icon={Icon.AppWindowList}
+              title="View All Services"
+              onAction={onViewServices}
+              shortcut={{ modifiers: ["cmd"], key: "v" }}
+            />
+          )}
         </ActionPanel.Section>
       )}
 

@@ -6,6 +6,7 @@ import ViewClusterServices from "../view-cluster-services";
 interface ClusterListItemProps {
   cluster: ClusterInfo;
   showDetail: boolean;
+  proxyUrl: string | null;
   onToggleDetail: () => void;
   onStart: () => void;
   onStop: () => void;
@@ -17,6 +18,7 @@ interface ClusterListItemProps {
 export function ClusterListItem({
   cluster,
   showDetail,
+  proxyUrl,
   onToggleDetail,
   onStart,
   onStop,
@@ -29,6 +31,7 @@ export function ClusterListItem({
   const statusColor = isRunning ? Color.Green : Color.SecondaryText;
   const statusIcon = { source: Icon.CircleFilled, tintColor: statusColor };
   const firstPorts = cluster.nodePorts?.[0];
+  const firstContainer = `yb-${cluster.name}-node1`;
 
   return (
     <List.Item
@@ -63,26 +66,57 @@ export function ClusterListItem({
                       icon={Icon.Terminal}
                     />
                     <List.Item.Detail.Metadata.Separator />
-                    {isRunning && (
-                      <List.Item.Detail.Metadata.Link
-                        title="YugabyteDB UI"
-                        target={`http://localhost:${firstPorts.yugabytedUI}`}
-                        text={`localhost:${firstPorts.yugabytedUI}`}
-                      />
+
+                    {/* Web UIs — proxy links are shown first as the default */}
+                    {isRunning && proxyUrl && (
+                      <>
+                        <List.Item.Detail.Metadata.Link
+                          title="Master UI"
+                          target={`${proxyUrl}/proxy/${firstContainer}:7000/`}
+                          text="proxy → :7000"
+                        />
+                        <List.Item.Detail.Metadata.Link
+                          title="TServer UI"
+                          target={`${proxyUrl}/proxy/${firstContainer}:9000/`}
+                          text="proxy → :9000"
+                        />
+                        <List.Item.Detail.Metadata.Link
+                          title="YugabyteDB UI"
+                          target={`${proxyUrl}/proxy/${firstContainer}:15433/`}
+                          text="proxy → :15433"
+                        />
+                        <List.Item.Detail.Metadata.Link
+                          title="Master RPC UI"
+                          target={`${proxyUrl}/proxy/${firstContainer}:7100/`}
+                          text="proxy → :7100"
+                        />
+                        <List.Item.Detail.Metadata.Link
+                          title="TServer RPC UI"
+                          target={`${proxyUrl}/proxy/${firstContainer}:9100/`}
+                          text="proxy → :9100"
+                        />
+                      </>
                     )}
-                    {isRunning && (
-                      <List.Item.Detail.Metadata.Link
-                        title="Master UI"
-                        target={`http://localhost:${firstPorts.masterUI}`}
-                        text={`localhost:${firstPorts.masterUI}`}
-                      />
-                    )}
-                    {isRunning && (
-                      <List.Item.Detail.Metadata.Link
-                        title="TServer UI"
-                        target={`http://localhost:${firstPorts.tserverUI}`}
-                        text={`localhost:${firstPorts.tserverUI}`}
-                      />
+
+                    {/* Direct links (fallback when proxy is unavailable) */}
+                    {isRunning && !proxyUrl && (
+                      <>
+                        <List.Item.Detail.Metadata.Link
+                          title="YugabyteDB UI"
+                          target={`http://localhost:${firstPorts.yugabytedUI}`}
+                          text={`localhost:${firstPorts.yugabytedUI}`}
+                        />
+                        <List.Item.Detail.Metadata.Link
+                          title="Master UI"
+                          target={`http://localhost:${firstPorts.masterUI}`}
+                          text={`localhost:${firstPorts.masterUI}`}
+                        />
+                        <List.Item.Detail.Metadata.Link
+                          title="TServer UI"
+                          target={`http://localhost:${firstPorts.tserverUI}`}
+                          text={`localhost:${firstPorts.tserverUI}`}
+                        />
+                      </>
                     )}
                   </>
                 ) : (
@@ -105,6 +139,7 @@ export function ClusterListItem({
       actions={
         <ClusterActions
           cluster={cluster}
+          proxyUrl={proxyUrl}
           onStart={onStart}
           onStop={onStop}
           onRestart={onRestart}

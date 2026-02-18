@@ -1,4 +1,5 @@
 import { getClusterServices } from "../utils/docker";
+import { getProxyPort } from "../utils/proxy";
 
 type Input = {
   /**
@@ -18,6 +19,9 @@ export default async function tool(input: Input) {
     return { error: `No services found for cluster "${input.name}". The cluster may be stopped or not exist.` };
   }
 
+  const proxyPort = getProxyPort();
+  const proxyBase = `http://localhost:${proxyPort}`;
+
   return services.map((s) => ({
     nodeNumber: s.nodeNumber,
     containerName: s.containerName,
@@ -32,6 +36,13 @@ export default async function tool(input: Input) {
       yugabytedUI: s.ports.yugabytedUI,
       masterUI: s.ports.masterUI,
       tserverUI: s.ports.tserverUI,
+    },
+    proxyUrls: {
+      masterUI: `${proxyBase}/proxy/${s.containerName}:7000/`,
+      tserverUI: `${proxyBase}/proxy/${s.containerName}:9000/`,
+      yugabytedUI: `${proxyBase}/proxy/${s.containerName}:15433/`,
+      masterRpcUI: `${proxyBase}/proxy/${s.containerName}:7100/`,
+      tserverRpcUI: `${proxyBase}/proxy/${s.containerName}:9100/`,
     },
   }));
 }
