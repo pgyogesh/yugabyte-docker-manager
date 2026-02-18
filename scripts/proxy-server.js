@@ -74,16 +74,30 @@ function findContainer(targetHost) {
   return lookupContainer(`any-yb`, `docker ps --filter "name=^yb-" --format "{{.Names}}" | head -1`);
 }
 
-function listRunningClusters() {
+/**
+ * List running clusters with per-node details.
+ * Returns: [{ name, nodes: [{ container, num }] }]
+ */
+function listRunningClustersDetailed() {
   return new Promise((resolve) => {
-    exec(`docker ps --filter "name=^yb-" --format "{{.Names}}"`, (err, stdout) => {
-      const names = (stdout || "").trim().split("\n").filter(Boolean);
-      const clusters = new Set();
-      for (const n of names) {
-        const c = extractClusterName(n);
-        if (c) clusters.add(c);
+    exec(`docker ps --filter "name=^yb-" --format "{{.Names}}\t{{.Status}}\t{{.Image}}"`, (err, stdout) => {
+      const lines = (stdout || "").trim().split("\n").filter(Boolean);
+      const clusterMap = new Map();
+      for (const line of lines) {
+        const [container, status, image] = line.split("\t");
+        const cluster = extractClusterName(container);
+        if (!cluster) continue;
+        const nodeMatch = container.match(/node(\d+)$/);
+        const num = nodeMatch ? parseInt(nodeMatch[1], 10) : 0;
+        if (!clusterMap.has(cluster)) {
+          clusterMap.set(cluster, { name: cluster, image: image || "", status: status || "", nodes: [] });
+        }
+        clusterMap.get(cluster).nodes.push({ container, num, status: status || "" });
       }
-      resolve(Array.from(clusters).sort());
+      for (const c of clusterMap.values()) {
+        c.nodes.sort((a, b) => a.num - b.num);
+      }
+      resolve(Array.from(clusterMap.values()).sort((a, b) => a.name.localeCompare(b.name)));
     });
   });
 }
@@ -227,9 +241,18 @@ function isResponseDone(res) {
 // Core proxy handler
 // ---------------------------------------------------------------------------
 
+const YB_FAVICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 233" fill="none"><path d="M14 0h57.3c4.1 0 6.4.2 8.3 1.1a10 10 0 0 1 4.6 4.6c1.1 2.2 1.1 5.1 1.1 11l0 76.6c0 6.6-.2 10.2-1.8 12.5a14 14 0 0 1-6.9 4.4c-2.8.5-6.1-.8-12.1-3.6L33.3 92c-9.9-4.7-15.6-7.8-20-12.1a44 44 0 0 1-10.8-16.8C.5 57.3.1 50.8 0 39.9V14c0-4.1.2-6.4 1.1-8.3A10 10 0 0 1 5.7 1.1C7.6.2 9.9 0 14 0zm170.7 0H242c4.1 0 6.4.2 8.3 1.1a10 10 0 0 1 4.6 4.6c1.1 2.2 1.1 5.1 1.1 11v23.1c-.1 11-.5 17.4-2.5 23.3a44 44 0 0 1-10.8 16.8c-5.4 5.3-12.9 8.8-27.7 15.8l-44.4 20.6V14c0-4.1.2-6.4 1.1-8.3a10 10 0 0 1 4.6-4.6C178.2.2 180.5 0 184.7 0zm-58.4 137l44.3-20.6v102.4c0 4.1-.2 6.4-1.1 8.3a10 10 0 0 1-4.6 4.6c-2.2 1.1-5.1 1.1-11 1.1H99.3c-4.1 0-6.4-.2-8.3-1.1a10 10 0 0 1-4.6-4.6c-1.1-2.2-1.1-5.1-1.1-11v-23.2c.1-11 .5-17.4 2.5-23.3a44 44 0 0 1 10.8-16.8c5.4-5.3 12.9-8.8 27.7-15.8z" fill="#FF5F3B"/></svg>`;
+
 function handleProxy(req, res, proxyOrigin) {
   const url = req.url || "/";
   const PREFIX = "/proxy/";
+
+  // Serve favicon
+  if (url === "/favicon.ico" || url === "/favicon.svg") {
+    res.writeHead(200, { "Content-Type": "image/svg+xml", "Cache-Control": "public, max-age=86400" });
+    res.end(YB_FAVICON_SVG);
+    return;
+  }
 
   if (!url.startsWith(PREFIX)) {
     serveLandingPage(res, proxyOrigin);
@@ -342,51 +365,240 @@ function handleProxy(req, res, proxyOrigin) {
 // ---------------------------------------------------------------------------
 
 function serveLandingPage(res, proxyOrigin) {
-  listRunningClusters()
+  listRunningClustersDetailed()
     .catch(() => [])
     .then((clusters) => {
-      const links =
-        clusters.length > 0
-          ? clusters
-              .map(
-                (c) => `
-      <div style="margin-bottom: 18px;">
-        <h3 style="margin-bottom: 6px;">Cluster: <em>${escapeHtml(c)}</em></h3>
-        <ul style="margin-top: 0;">
-          <li><a href="/proxy/yb-${escapeHtml(c)}-node1:7000/">Master Web UI (:7000)</a></li>
-          <li><a href="/proxy/yb-${escapeHtml(c)}-node1:9000/">TServer Web UI (:9000)</a></li>
-          <li><a href="/proxy/yb-${escapeHtml(c)}-node1:15433/">YugabyteDB UI (:15433)</a></li>
-          <li><a href="/proxy/yb-${escapeHtml(c)}-node1:7100/">Master RPC UI (:7100)</a></li>
-          <li><a href="/proxy/yb-${escapeHtml(c)}-node1:9100/">TServer RPC UI (:9100)</a></li>
-        </ul>
-      </div>`,
-              )
-              .join("\n")
-          : `<p><em>No running clusters found.</em></p>`;
-
       if (isResponseDone(res)) return;
+
+      const clusterCards = clusters.length > 0
+        ? clusters.map((c) => {
+          const version = (c.image || "").split(":")[1] || "unknown";
+          const nodeItems = c.nodes.map((n) => `
+            <div class="node">
+              <div class="node-head">
+                <span class="dot"></span>
+                <span class="node-name">${escapeHtml(n.container)}</span>
+              </div>
+              <div class="node-links">
+                <a href="/proxy/${escapeHtml(n.container)}:7000/" class="pill master" title="Master Web UI">Master</a>
+                <a href="/proxy/${escapeHtml(n.container)}:9000/" class="pill tserver" title="TServer Web UI">TServer</a>
+                <a href="/proxy/${escapeHtml(n.container)}:15433/" class="pill ybui" title="YugabyteDB UI">YBDB UI</a>
+                <a href="/proxy/${escapeHtml(n.container)}:7100/" class="pill rpc" title="Master RPC">M-RPC</a>
+                <a href="/proxy/${escapeHtml(n.container)}:9100/" class="pill rpc" title="TServer RPC">T-RPC</a>
+              </div>
+            </div>`).join("");
+
+          return `
+          <div class="card">
+            <div class="card-top">
+              <div class="card-info">
+                <span class="card-name">${escapeHtml(c.name)}</span>
+                <span class="card-meta">${c.nodes.length}N &middot; v${escapeHtml(version)}</span>
+              </div>
+              <span class="badge">Running</span>
+            </div>
+            <div class="nodes">${nodeItems}</div>
+          </div>`;
+        }).join("")
+        : `<div class="empty">
+            <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="var(--muted)" stroke-width="1.5"><circle cx="12" cy="12" r="10"/><path d="M8 12h8M12 8v8"/></svg>
+            <p>No running clusters</p>
+            <p class="hint">Start a cluster to see it here</p>
+          </div>`;
 
       res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
       res.end(`<!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>YugabyteDB Docker Proxy</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <style>
-    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-           max-width: 640px; margin: 60px auto; padding: 0 20px; color: #333; }
-    code { background: #f0f0f0; padding: 2px 6px; border-radius: 3px; font-size: 0.9em; }
-    a    { color: #1a73e8; }
-    h1   { font-size: 1.6em; }
-    h3   { font-size: 1.1em; }
+    :root {
+      --bg: #f5f6f8;
+      --surface: #ffffff;
+      --surface2: #f0f1f4;
+      --border: #e2e4ea;
+      --text: #1a1d2b;
+      --muted: #6b7085;
+      --orange: #FF5F3B;
+      --orange-dim: rgba(255,95,59,.08);
+      --orange-mid: rgba(255,95,59,.15);
+      --blue: #2563eb;
+      --blue-dim: rgba(37,99,235,.08);
+      --teal: #0d9488;
+      --teal-dim: rgba(13,148,136,.08);
+      --green: #16a34a;
+      --green-glow: rgba(22,163,74,.25);
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+    }
+
+    /* ---- HEADER ---- */
+    .hdr {
+      padding: 28px 20px 22px;
+      text-align: center;
+      background: #fff;
+      border-bottom: 1px solid var(--border);
+    }
+    .hdr-inner { max-width: 720px; margin: 0 auto; }
+
+    .brand {
+      display: inline-flex; align-items: center; gap: 10px;
+    }
+    .brand svg { flex-shrink: 0; }
+    .brand h1 {
+      font-size: 17px; font-weight: 700; letter-spacing: -0.2px;
+    }
+    .brand h1 span { color: var(--orange); }
+
+    .tagline {
+      margin-top: 6px; font-size: 13px; color: var(--muted); line-height: 1.4;
+    }
+
+    .url-hint {
+      margin-top: 12px; display: inline-block;
+      background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
+      padding: 5px 14px;
+      font: 12px/1.4 "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+      color: var(--muted);
+    }
+    .url-hint b { color: var(--orange); font-weight: 600; }
+
+    /* ---- MAIN ---- */
+    .main { max-width: 720px; margin: 0 auto; padding: 20px 20px 48px; }
+
+    .toolbar {
+      display: flex; align-items: center; justify-content: space-between;
+      margin-bottom: 12px;
+    }
+    .toolbar-label {
+      font-size: 11px; font-weight: 700; text-transform: uppercase;
+      letter-spacing: 0.7px; color: var(--muted);
+    }
+    .btn-refresh {
+      background: var(--surface); border: 1px solid var(--border);
+      color: var(--muted); font: 500 11px/1 system-ui, sans-serif;
+      padding: 4px 10px; border-radius: 5px; cursor: pointer;
+      transition: .15s;
+    }
+    .btn-refresh:hover { color: var(--text); border-color: var(--orange); }
+
+    /* ---- CARD ---- */
+    .card {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: 10px; margin-bottom: 12px;
+      box-shadow: 0 1px 3px rgba(0,0,0,.04);
+      transition: border-color .15s, box-shadow .15s;
+    }
+    .card:hover { border-color: #cdd0d9; box-shadow: 0 2px 8px rgba(0,0,0,.07); }
+
+    .card-top {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 10px 14px;
+      border-bottom: 1px solid var(--border);
+    }
+    .card-info { display: flex; align-items: baseline; gap: 8px; }
+    .card-name { font-size: 14px; font-weight: 600; }
+    .card-meta { font-size: 11px; color: var(--muted); }
+
+    .badge {
+      font-size: 10px; font-weight: 700; text-transform: uppercase;
+      letter-spacing: 0.4px; padding: 2px 8px; border-radius: 10px;
+      background: rgba(52,211,153,.12); color: var(--green);
+    }
+
+    /* ---- NODES ---- */
+    .nodes { padding: 6px 14px 8px; }
+
+    .node {
+      display: flex; align-items: center; gap: 10px;
+      padding: 5px 0;
+    }
+    .node + .node { border-top: 1px solid var(--border); }
+
+    .node-head {
+      display: flex; align-items: center; gap: 6px;
+      min-width: 0; flex-shrink: 0;
+    }
+    .dot {
+      width: 6px; height: 6px; border-radius: 50%;
+      background: var(--green);
+      box-shadow: 0 0 5px var(--green-glow);
+      flex-shrink: 0;
+    }
+    .node-name {
+      font: 500 11.5px/1 "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      color: var(--text);
+    }
+
+    .node-links {
+      display: flex; gap: 4px; flex-wrap: wrap; margin-left: auto;
+    }
+
+    .pill {
+      display: inline-block; padding: 2px 8px; border-radius: 4px;
+      font-size: 10.5px; font-weight: 600; text-decoration: none;
+      transition: .12s; white-space: nowrap; letter-spacing: 0.1px;
+    }
+    .pill.master  { background: var(--orange-dim); color: var(--orange); }
+    .pill.master:hover  { background: var(--orange-mid); }
+    .pill.tserver { background: var(--blue-dim); color: var(--blue); }
+    .pill.tserver:hover { background: rgba(59,125,221,.22); }
+    .pill.ybui    { background: var(--teal-dim); color: var(--teal); }
+    .pill.ybui:hover    { background: rgba(45,205,164,.22); }
+    .pill.rpc     { background: var(--surface2); color: var(--muted); border: 1px solid var(--border); }
+    .pill.rpc:hover     { color: var(--text); background: var(--border); border-color: var(--border); }
+
+    /* ---- EMPTY ---- */
+    .empty {
+      text-align: center; padding: 48px 20px; color: var(--muted);
+    }
+    .empty svg { margin-bottom: 12px; opacity: .4; }
+    .empty p { font-size: 14px; margin-bottom: 4px; }
+    .empty .hint { font-size: 12px; opacity: .6; }
+
+    /* ---- FOOTER ---- */
+    .footer {
+      text-align: center; padding: 16px; font-size: 11px; color: var(--muted); opacity: .4;
+    }
+
+    @media (max-width: 520px) {
+      .node { flex-direction: column; align-items: flex-start; gap: 4px; }
+      .node-links { margin-left: 12px; }
+    }
   </style>
 </head>
 <body>
-  <h1>YugabyteDB Docker Proxy</h1>
-  <p>This proxy forwards requests to internal Docker container addresses that
-     are not directly reachable from the host.</p>
-  <h3>Usage</h3>
-  <p><code>/proxy/&lt;container-hostname&gt;:&lt;port&gt;/&lt;path&gt;</code></p>
-  ${links}
+  <div class="hdr"><div class="hdr-inner">
+    <div class="brand">
+      <svg class="yb-logo" width="26" height="24" viewBox="0 0 256 233" fill="none">
+        <path d="M14 0h57.3c4.1 0 6.4.2 8.3 1.1a10 10 0 0 1 4.6 4.6c1.1 2.2 1.1 5.1 1.1 11l0 76.6c0 6.6-.2 10.2-1.8 12.5a14 14 0 0 1-6.9 4.4c-2.8.5-6.1-.8-12.1-3.6L33.3 92c-9.9-4.7-15.6-7.8-20-12.1a44 44 0 0 1-10.8-16.8C.5 57.3.1 50.8 0 39.9V14c0-4.1.2-6.4 1.1-8.3A10 10 0 0 1 5.7 1.1C7.6.2 9.9 0 14 0zm170.7 0H242c4.1 0 6.4.2 8.3 1.1a10 10 0 0 1 4.6 4.6c1.1 2.2 1.1 5.1 1.1 11v23.1c-.1 11-.5 17.4-2.5 23.3a44 44 0 0 1-10.8 16.8c-5.4 5.3-12.9 8.8-27.7 15.8l-44.4 20.6V14c0-4.1.2-6.4 1.1-8.3a10 10 0 0 1 4.6-4.6C178.2.2 180.5 0 184.7 0zm-58.4 137l44.3-20.6v102.4c0 4.1-.2 6.4-1.1 8.3a10 10 0 0 1-4.6 4.6c-2.2 1.1-5.1 1.1-11 1.1H99.3c-4.1 0-6.4-.2-8.3-1.1a10 10 0 0 1-4.6-4.6c-1.1-2.2-1.1-5.1-1.1-11v-23.2c.1-11 .5-17.4 2.5-23.3a44 44 0 0 1 10.8-16.8c5.4-5.3 12.9-8.8 27.7-15.8z" fill="#FF5F3B"/>
+      </svg>
+      <h1><span>Yugabyte</span>DB Docker Proxy</h1>
+    </div>
+    <p class="tagline">Forwards requests to internal Docker container web UIs</p>
+    <div class="url-hint"><b>/proxy/</b>&lt;host&gt;:&lt;port&gt;/path</div>
+  </div></div>
+
+  <div class="main">
+    <div class="toolbar">
+      <span class="toolbar-label">Clusters (${clusters.length})</span>
+      <button class="btn-refresh" onclick="location.reload()">Refresh</button>
+    </div>
+    ${clusterCards}
+  </div>
+
+  <div class="footer">localhost:${PORT}</div>
 </body>
 </html>`);
     });

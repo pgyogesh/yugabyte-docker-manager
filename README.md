@@ -61,7 +61,15 @@ npm run proxy:stop
 npm run proxy:restart
 ```
 
-Once running, the proxy's landing page at [http://localhost:15080](http://localhost:15080) lists all running clusters with quick links to their web UIs.
+### Landing page
+
+Once running, open [http://localhost:15080](http://localhost:15080) to see the proxy landing page. It auto-discovers all running clusters and displays:
+
+- Cluster name, node count, and YugabyteDB version
+- Per-node quick links to **Master UI**, **TServer UI**, **YBDB UI**, and **RPC endpoints**
+- Live status indicators for each node
+
+The page provides one-click access to every web UI across all your clusters.
 
 ## AI Tools
 
