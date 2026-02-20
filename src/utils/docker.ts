@@ -725,6 +725,219 @@ function defaultPorts(offset: number): NodePorts {
 }
 
 // ---------------------------------------------------------------------------
+// GFlags management
+// ---------------------------------------------------------------------------
+
+function parseGFlagsToMap(flags?: string): Record<string, string> {
+  if (!flags?.trim()) return {};
+  const result: Record<string, string> = {};
+  const parts = flags.trim().split(/[\s,\n]+/).filter(Boolean);
+  for (const part of parts) {
+    const clean = part.replace(/^--+/, "");
+    const eqIdx = clean.indexOf("=");
+    if (eqIdx > 0) {
+      result[clean.substring(0, eqIdx)] = clean.substring(eqIdx + 1);
+    }
+  }
+  return result;
+}
+
+function gflagsMapToString(flags: Record<string, string>): string {
+  return Object.entries(flags)
+    .map(([k, v]) => `--${k}=${v}`)
+    .join(" ");
+}
+
+export async function setGFlagRuntime(
+  clusterName: string,
+  serverType: "master" | "tserver",
+  flagName: string,
+  flagValue: string,
+): Promise<{ node: string; success: boolean; error?: string }[]> {
+  const cluster = await getCluster(clusterName);
+  if (!cluster) throw new Error(`Cluster "${clusterName}" not found`);
+  if (cluster.status !== "running") throw new Error(`Cluster "${clusterName}" must be running to set flags`);
+
+  const results: { node: string; success: boolean; error?: string }[] = [];
+  const firstContainer = `yb-${clusterName}-node1`;
+  const port = serverType === "master" ? 7100 : 9100;
+
+  for (let i = 1; i <= cluster.nodes; i++) {
+    const nodeName = `yb-${clusterName}-node${i}`;
+    const escapedValue = flagValue.replace(/'/g, "'\\''");
+    const cmd = `docker exec ${firstContainer} /home/yugabyte/bin/yb-ts-cli --server_address ${nodeName}:${port} set_flag --force ${flagName} '${escapedValue}'`;
+    try {
+      await executeDockerCommand(cmd);
+      results.push({ node: nodeName, success: true });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Unknown error";
+      results.push({ node: nodeName, success: false, error: msg });
+    }
+  }
+
+  return results;
+}
+
+export async function updateClusterGFlags(
+  clusterName: string,
+  serverType: "master" | "tserver",
+  flags: Record<string, string>,
+): Promise<void> {
+  const cluster = await getCluster(clusterName);
+  if (!cluster) throw new Error(`Cluster "${clusterName}" not found`);
+
+  const existing = parseGFlagsToMap(
+    serverType === "master" ? cluster.masterGFlags : cluster.tserverGFlags,
+  );
+  for (const [key, value] of Object.entries(flags)) {
+    existing[key] = value;
+  }
+
+  const merged = gflagsMapToString(existing);
+  if (serverType === "master") {
+    cluster.masterGFlags = merged;
+  } else {
+    cluster.tserverGFlags = merged;
+  }
+
+  await saveCluster(cluster);
+}
+
+/**
+ * Waits until `yb-admin list_all_masters` reports all expected masters as
+ * ALIVE with at least one LEADER. This is deliberately lighter than
+ * `list_all_tablet_servers` which requires the master leader to have fully
+ * loaded the sys_catalog (and will always fail when flags like
+ * `emergency_repair_mode` are set).
+ *
+ * Throws if the cluster doesn't become ready within the timeout.
+ */
+async function waitForClusterReady(
+  clusterName: string,
+  numNodes: number,
+  timeoutMs: number = 180000,
+): Promise<void> {
+  const masterAddresses = Array.from(
+    { length: numNodes },
+    (_, i) => `yb-${clusterName}-node${i + 1}:7100`,
+  ).join(",");
+
+  const start = Date.now();
+  let lastError = "";
+  while (Date.now() - start < timeoutMs) {
+    for (let i = 1; i <= numNodes; i++) {
+      try {
+        const container = `yb-${clusterName}-node${i}`;
+        const { stdout } = await executeDockerCommand(
+          `docker exec ${container} /home/yugabyte/bin/yb-admin -master_addresses ${masterAddresses} list_all_masters`,
+        );
+        const lines = stdout.trim().split("\n").filter((l) => l.trim());
+        const aliveCount = lines.filter((l) => l.includes("ALIVE")).length;
+        const hasLeader = lines.some((l) => l.includes("LEADER"));
+        if (aliveCount >= numNodes && hasLeader) {
+          return;
+        }
+        lastError = `Masters alive: ${aliveCount}/${numNodes}, leader elected: ${hasLeader}`;
+      } catch (err: unknown) {
+        lastError = err instanceof Error ? err.message : "Unknown error";
+      }
+    }
+    await new Promise((resolve) => setTimeout(resolve, 5000));
+  }
+  throw new Error(`Cluster readiness check timed out after ${timeoutMs / 1000}s. Last status: ${lastError.substring(0, 200)}`);
+}
+
+/**
+ * Reads the existing yugabyted.conf from a node's host-mounted data volume,
+ * updates the master_flags / tserver_flags fields, and writes it back. On
+ * the next `docker start` yugabyted picks up the updated conf automatically.
+ */
+async function updateYugabytedConf(
+  clusterName: string,
+  nodeNumber: number,
+  cluster: ClusterInfo,
+): Promise<void> {
+  const os = await import("os");
+  const path = await import("path");
+  const fs = await import("fs/promises");
+
+  const confDir = path.join(
+    os.homedir(),
+    `yb_docker_data_${clusterName}`,
+    `node${nodeNumber}`,
+    "conf",
+  );
+  const confPath = path.join(confDir, "yugabyted.conf");
+
+  let conf: Record<string, unknown> = {};
+  try {
+    const data = await fs.readFile(confPath, "utf-8");
+    conf = JSON.parse(data);
+  } catch {
+    // File doesn't exist or is invalid — will be created from scratch
+  }
+
+  if (cluster.masterGFlags?.trim()) {
+    conf.master_flags = processGFlags(cluster.masterGFlags);
+  }
+  if (cluster.tserverGFlags?.trim()) {
+    conf.tserver_flags = processGFlags(cluster.tserverGFlags);
+  }
+
+  await fs.mkdir(confDir, { recursive: true });
+  await fs.writeFile(confPath, JSON.stringify(conf, null, 2), "utf-8");
+}
+
+/**
+ * Stops the entire cluster, writes updated yugabyted.conf files on each
+ * node's host volume, then starts all containers again. This is the most
+ * reliable way to change GFlags — yugabyted reads its conf on startup.
+ */
+export async function restartClusterWithFlags(
+  clusterName: string,
+  serverType: "master" | "tserver" | "both",
+  flagName: string,
+  flagValue: string,
+  onProgress?: ProgressCallback,
+): Promise<void> {
+  const cluster = await getCluster(clusterName);
+  if (!cluster) throw new Error(`Cluster "${clusterName}" not found`);
+
+  const types: ("master" | "tserver")[] =
+    serverType === "both" ? ["master", "tserver"] : [serverType];
+
+  for (const type of types) {
+    const existing = parseGFlagsToMap(
+      type === "master" ? cluster.masterGFlags : cluster.tserverGFlags,
+    );
+    existing[flagName] = flagValue;
+    const merged = gflagsMapToString(existing);
+    if (type === "master") {
+      cluster.masterGFlags = merged;
+    } else {
+      cluster.tserverGFlags = merged;
+    }
+  }
+  await saveCluster(cluster);
+
+  onProgress?.({ stage: "stopping", message: "Stopping cluster..." });
+  await stopCluster(clusterName);
+
+  onProgress?.({ stage: "config", message: "Updating configuration..." });
+  for (let i = 1; i <= cluster.nodes; i++) {
+    await updateYugabytedConf(clusterName, i, cluster);
+  }
+
+  onProgress?.({ stage: "starting", message: "Starting cluster..." });
+  await startCluster(clusterName);
+
+  onProgress?.({ stage: "ready", message: "Waiting for cluster to be ready..." });
+  await waitForClusterReady(clusterName, cluster.nodes);
+
+  onProgress?.({ stage: "complete", message: "Cluster restarted with updated flags" });
+}
+
+// ---------------------------------------------------------------------------
 // Docker Hub releases
 // ---------------------------------------------------------------------------
 

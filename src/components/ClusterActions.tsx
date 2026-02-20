@@ -2,6 +2,7 @@ import { Action, ActionPanel, Icon, Color, confirmAlert, Alert, launchCommand, L
 import { ClusterInfo } from "../types";
 import { openInTerminal } from "../utils/terminal";
 import { ScaleClusterForm } from "./ScaleClusterForm";
+import { SetGFlagsForm } from "./SetGFlagsForm";
 
 interface ClusterActionsProps {
   cluster: ClusterInfo;
@@ -164,6 +165,12 @@ export function ClusterActions({
             title="Scale Cluster"
             onAction={() => onPush(<ScaleClusterForm cluster={cluster} />)}
             shortcut={{ modifiers: ["cmd"], key: "n" }}
+          />
+          <Action
+            icon={Icon.Gear}
+            title="Set GFlags"
+            onAction={() => onPush(<SetGFlagsForm cluster={cluster} />)}
+            shortcut={{ modifiers: ["cmd"], key: "g" }}
           />
         </ActionPanel.Section>
       )}
