@@ -147,14 +147,14 @@ export default function Command() {
       <Form.Separator />
       <Form.TextArea
         title="Master GFlags (Optional)"
-        placeholder="max_log_size=256,log_min_seconds_to_retain=3600"
-        info="Custom GFlags for yb-master. Format: flag1=value1,flag2=value2 (comma-separated, no -- prefix)"
+        placeholder={`max_log_size=256\nlog_min_seconds_to_retain=3600`}
+        info="One flag per line in name=value format. No special escaping needed — commas in values are preserved as-is."
         {...itemProps.masterGFlags}
       />
       <Form.TextArea
         title="TServer GFlags (Optional)"
-        placeholder="pg_yb_session_timeout_ms=1200000,ysql_max_connections=400"
-        info="Custom GFlags for yb-tserver. Format: flag1=value1,flag2=value2 (comma-separated, no -- prefix)"
+        placeholder={`ysql_max_connections=400\nysql_pg_conf_csv="shared_preload_libraries=passwordcheck,auto_explain",pgaudit.log=ROLE`}
+        info="One flag per line in name=value format. For CSV flags like ysql_pg_conf_csv, just write the value as-is — commas within the value are handled automatically."
         {...itemProps.tserverGFlags}
       />
     </Form>

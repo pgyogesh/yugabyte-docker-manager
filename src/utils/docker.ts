@@ -260,7 +260,10 @@ export async function createYugabyteCluster(
   await new Promise((resolve) => setTimeout(resolve, 5000));
 
   onProgress?.({ stage: "complete", message: "Cluster created successfully!" });
-  await saveCluster({ name, nodes, version, status: "running", masterGFlags, tserverGFlags, nodePorts });
+
+  const normalizedMaster = normalizeGFlagsForStorage(masterGFlags);
+  const normalizedTserver = normalizeGFlagsForStorage(tserverGFlags);
+  await saveCluster({ name, nodes, version, status: "running", masterGFlags: normalizedMaster, tserverGFlags: normalizedTserver, nodePorts });
 }
 
 async function ensureImage(version: string, onProgress?: ProgressCallback): Promise<void> {
@@ -302,13 +305,119 @@ async function ensureImage(version: string, onProgress?: ProgressCallback): Prom
   }
 }
 
+/**
+ * Splits a flag string into individual flag entries, respecting quoted values
+ * and curly braces so that commas/spaces inside them aren't treated as
+ * flag separators.
+ *
+ * Handles three formats (auto-detected in priority order):
+ *  1. "--flag=val --flag2=val2"  → split on -- boundaries
+ *  2. "flag=val\nflag2=val2"    → one flag per line (newline-separated)
+ *  3. "flag=val,flag2=val2"     → comma-separated (values with commas
+ *                                  must be wrapped in {})
+ *
+ * Format 2 is the safest for complex values that contain commas (like
+ * ysql_pg_conf_csv) because commas within a line are always part of
+ * the value, never a separator.
+ */
+function splitFlagEntries(input: string): string[] {
+  const s = input.trim();
+  if (!s) return [];
+
+  const useDashBoundaries = /(?:^|[\s,])--/.test(s);
+
+  // Multi-line without -- prefix: one flag per line — the safest format
+  // for values that contain commas (no escaping or {} needed).
+  if (!useDashBoundaries && s.includes("\n")) {
+    return s
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0);
+  }
+
+  const entries: string[] = [];
+  let i = 0;
+
+  while (i < s.length) {
+    while (i < s.length && /[\s,]/.test(s[i])) i++;
+    if (i >= s.length) break;
+
+    const start = i;
+    let inQuote = false;
+    let quoteChar = "";
+    let braceDepth = 0;
+
+    while (i < s.length) {
+      const ch = s[i];
+
+      if (inQuote) {
+        if (ch === quoteChar) inQuote = false;
+        i++;
+        continue;
+      }
+      if (ch === '"' || ch === "'") {
+        inQuote = true;
+        quoteChar = ch;
+        i++;
+        continue;
+      }
+      if (ch === "{") {
+        braceDepth++;
+        i++;
+        continue;
+      }
+      if (ch === "}" && braceDepth > 0) {
+        braceDepth--;
+        i++;
+        continue;
+      }
+
+      if (braceDepth === 0 && /[\s,]/.test(ch)) {
+        if (useDashBoundaries) {
+          let j = i;
+          while (j < s.length && /[\s,]/.test(s[j])) j++;
+          if (j >= s.length || (s[j] === "-" && j + 1 < s.length && s[j + 1] === "-")) {
+            break;
+          }
+        } else {
+          break;
+        }
+      }
+
+      i++;
+    }
+
+    const entry = s.substring(start, i).trim();
+    if (entry) entries.push(entry);
+  }
+
+  return entries;
+}
+
+/**
+ * Converts a stored flag string into the comma-separated format expected by
+ * yugabyted's --master_flags / --tserver_flags.
+ *
+ * Flag values that contain commas are wrapped in {} so that yugabyted does
+ * not treat inner commas as flag separators.
+ */
 function processGFlags(flags: string): string {
-  return flags
-    .trim()
-    .split(/[\s,\n]+/)
-    .map((f) => f.trim())
+  return splitFlagEntries(flags)
+    .map((f) => {
+      const stripped = f.replace(/^--+/, "").trim();
+      if (!stripped) return "";
+      const eqIdx = stripped.indexOf("=");
+      if (eqIdx <= 0) return stripped;
+
+      const name = stripped.substring(0, eqIdx);
+      const value = stripped.substring(eqIdx + 1);
+
+      if (value.includes(",") && !(value.startsWith("{") && value.endsWith("}"))) {
+        return `${name}={${value}}`;
+      }
+      return stripped;
+    })
     .filter((f) => f.length > 0)
-    .map((f) => f.replace(/^--+/, ""))
     .join(",");
 }
 
@@ -728,15 +837,19 @@ function defaultPorts(offset: number): NodePorts {
 // GFlags management
 // ---------------------------------------------------------------------------
 
-function parseGFlagsToMap(flags?: string): Record<string, string> {
+export function parseGFlagsToMap(flags?: string): Record<string, string> {
   if (!flags?.trim()) return {};
   const result: Record<string, string> = {};
-  const parts = flags.trim().split(/[\s,\n]+/).filter(Boolean);
+  const parts = splitFlagEntries(flags.trim());
   for (const part of parts) {
-    const clean = part.replace(/^--+/, "");
+    const clean = part.replace(/^--+/, "").trim();
     const eqIdx = clean.indexOf("=");
     if (eqIdx > 0) {
-      result[clean.substring(0, eqIdx)] = clean.substring(eqIdx + 1);
+      let value = clean.substring(eqIdx + 1);
+      if (value.startsWith("{") && value.endsWith("}")) {
+        value = value.substring(1, value.length - 1);
+      }
+      result[clean.substring(0, eqIdx)] = value;
     }
   }
   return result;
@@ -746,6 +859,13 @@ function gflagsMapToString(flags: Record<string, string>): string {
   return Object.entries(flags)
     .map(([k, v]) => `--${k}=${v}`)
     .join(" ");
+}
+
+function normalizeGFlagsForStorage(flags?: string): string | undefined {
+  if (!flags?.trim()) return undefined;
+  const map = parseGFlagsToMap(flags);
+  if (Object.keys(map).length === 0) return undefined;
+  return gflagsMapToString(map);
 }
 
 export async function setGFlagRuntime(
@@ -803,6 +923,76 @@ export async function updateClusterGFlags(
   await saveCluster(cluster);
 }
 
+export async function removeClusterGFlags(
+  clusterName: string,
+  serverType: "master" | "tserver",
+  flagNames: string[],
+): Promise<void> {
+  const cluster = await getCluster(clusterName);
+  if (!cluster) throw new Error(`Cluster "${clusterName}" not found`);
+
+  const existing = parseGFlagsToMap(
+    serverType === "master" ? cluster.masterGFlags : cluster.tserverGFlags,
+  );
+  for (const name of flagNames) {
+    delete existing[name];
+  }
+
+  const updated = gflagsMapToString(existing);
+  if (serverType === "master") {
+    cluster.masterGFlags = updated;
+  } else {
+    cluster.tserverGFlags = updated;
+  }
+
+  await saveCluster(cluster);
+}
+
+export async function restartClusterWithoutFlag(
+  clusterName: string,
+  serverType: "master" | "tserver" | "both",
+  flagNames: string[],
+  onProgress?: ProgressCallback,
+): Promise<void> {
+  const cluster = await getCluster(clusterName);
+  if (!cluster) throw new Error(`Cluster "${clusterName}" not found`);
+
+  const types: ("master" | "tserver")[] =
+    serverType === "both" ? ["master", "tserver"] : [serverType];
+
+  for (const type of types) {
+    const existing = parseGFlagsToMap(
+      type === "master" ? cluster.masterGFlags : cluster.tserverGFlags,
+    );
+    for (const name of flagNames) {
+      delete existing[name];
+    }
+    const merged = gflagsMapToString(existing);
+    if (type === "master") {
+      cluster.masterGFlags = merged;
+    } else {
+      cluster.tserverGFlags = merged;
+    }
+  }
+  await saveCluster(cluster);
+
+  onProgress?.({ stage: "stopping", message: "Stopping cluster..." });
+  await stopCluster(clusterName);
+
+  onProgress?.({ stage: "config", message: "Updating configuration..." });
+  for (let i = 1; i <= cluster.nodes; i++) {
+    await updateYugabytedConf(clusterName, i, cluster);
+  }
+
+  onProgress?.({ stage: "starting", message: "Starting cluster..." });
+  await startCluster(clusterName);
+
+  onProgress?.({ stage: "ready", message: "Waiting for cluster to be ready..." });
+  await waitForClusterReady(clusterName, cluster.nodes);
+
+  onProgress?.({ stage: "complete", message: "Cluster restarted with flags removed" });
+}
+
 /**
  * Waits until `yb-admin list_all_masters` reports all expected masters as
  * ALIVE with at least one LEADER. This is deliberately lighter than
@@ -847,10 +1037,110 @@ async function waitForClusterReady(
   throw new Error(`Cluster readiness check timed out after ${timeoutMs / 1000}s. Last status: ${lastError.substring(0, 200)}`);
 }
 
+// Flags whose values are CSV lists of PostgreSQL settings. When merging
+// with an existing yugabyted.conf these need setting-level merging so that
+// presets (e.g. yb_enable_cbo=on) aren't duplicated or lost.
+const CSV_VALUE_FLAGS = new Set(["ysql_pg_conf_csv", "ysql_hba_conf_csv"]);
+
+/**
+ * Splits a CSV-style flag value (e.g. the value of ysql_pg_conf_csv) into
+ * individual PostgreSQL settings, respecting quoted entries that may contain
+ * commas.
+ */
+function splitCSVSettings(csv: string): string[] {
+  if (!csv.trim()) return [];
+  const settings: string[] = [];
+  let i = 0;
+  const s = csv.trim();
+
+  while (i < s.length) {
+    while (i < s.length && s[i] === ",") i++;
+    if (i >= s.length) break;
+
+    const start = i;
+    let inQuote = false;
+
+    while (i < s.length) {
+      if (inQuote) {
+        if (s[i] === '"') inQuote = false;
+      } else {
+        if (s[i] === '"') inQuote = true;
+        else if (s[i] === ",") break;
+      }
+      i++;
+    }
+
+    const entry = s.substring(start, i).trim();
+    if (entry) settings.push(entry);
+  }
+
+  return settings;
+}
+
+function extractPGSettingName(setting: string): string {
+  let s = setting.trim();
+  if (s.startsWith('"')) s = s.substring(1);
+  const eqIdx = s.indexOf("=");
+  return eqIdx > 0 ? s.substring(0, eqIdx).trim() : s;
+}
+
+/**
+ * Merges two CSV-style flag values at the PostgreSQL-setting level.
+ * Incoming settings override existing ones with the same setting name;
+ * existing settings with different names (presets) are preserved.
+ */
+function mergeCSVFlagValues(existing: string, incoming: string): string {
+  const merged = new Map<string, string>();
+  for (const s of splitCSVSettings(existing)) {
+    merged.set(extractPGSettingName(s), s);
+  }
+  for (const s of splitCSVSettings(incoming)) {
+    merged.set(extractPGSettingName(s), s);
+  }
+  return Array.from(merged.values()).join(",");
+}
+
+/**
+ * Merges our stored flags with the flags already present in the
+ * yugabyted.conf. For most flags our value simply overrides; for CSV-value
+ * flags (ysql_pg_conf_csv, ysql_hba_conf_csv) the individual PostgreSQL
+ * settings are merged so that presets from yugabyted are preserved.
+ *
+ * Returns the merged comma-separated string for the conf, or empty string
+ * if there are no flags.
+ */
+function mergeConfFlags(existingConfStr: string | undefined, ourStoredFlags: string | undefined): string {
+  const existingMap = parseGFlagsToMap(existingConfStr || "");
+  const ourMap = parseGFlagsToMap(ourStoredFlags || "");
+
+  const merged = { ...existingMap };
+
+  for (const [key, value] of Object.entries(ourMap)) {
+    if (CSV_VALUE_FLAGS.has(key) && merged[key]) {
+      merged[key] = mergeCSVFlagValues(merged[key], value);
+    } else {
+      merged[key] = value;
+    }
+  }
+
+  const entries = Object.entries(merged);
+  if (entries.length === 0) return "";
+
+  return entries
+    .map(([k, v]) => {
+      if (v.includes(",") && !(v.startsWith("{") && v.endsWith("}"))) {
+        return `${k}={${v}}`;
+      }
+      return `${k}=${v}`;
+    })
+    .join(",");
+}
+
 /**
  * Reads the existing yugabyted.conf from a node's host-mounted data volume,
- * updates the master_flags / tserver_flags fields, and writes it back. On
- * the next `docker start` yugabyted picks up the updated conf automatically.
+ * merges our flags with existing conf flags (preserving yugabyted presets),
+ * and writes it back. On the next `docker start` yugabyted picks up the
+ * updated conf automatically.
  */
 async function updateYugabytedConf(
   clusterName: string,
@@ -877,11 +1167,21 @@ async function updateYugabytedConf(
     // File doesn't exist or is invalid — will be created from scratch
   }
 
-  if (cluster.masterGFlags?.trim()) {
-    conf.master_flags = processGFlags(cluster.masterGFlags);
+  const existingMaster = typeof conf.master_flags === "string" ? (conf.master_flags as string) : undefined;
+  const existingTserver = typeof conf.tserver_flags === "string" ? (conf.tserver_flags as string) : undefined;
+
+  const mergedMaster = mergeConfFlags(existingMaster, cluster.masterGFlags);
+  const mergedTserver = mergeConfFlags(existingTserver, cluster.tserverGFlags);
+
+  if (mergedMaster) {
+    conf.master_flags = mergedMaster;
+  } else {
+    delete conf.master_flags;
   }
-  if (cluster.tserverGFlags?.trim()) {
-    conf.tserver_flags = processGFlags(cluster.tserverGFlags);
+  if (mergedTserver) {
+    conf.tserver_flags = mergedTserver;
+  } else {
+    delete conf.tserver_flags;
   }
 
   await fs.mkdir(confDir, { recursive: true });
@@ -935,6 +1235,101 @@ export async function restartClusterWithFlags(
   await waitForClusterReady(clusterName, cluster.nodes);
 
   onProgress?.({ stage: "complete", message: "Cluster restarted with updated flags" });
+}
+
+// ---------------------------------------------------------------------------
+// Varz flag discovery
+// ---------------------------------------------------------------------------
+
+export interface VarzFlag {
+  name: string;
+  value: string;
+}
+
+function parseVarzJson(raw: string): VarzFlag[] | null {
+  try {
+    const data = JSON.parse(raw) as { flags?: { name: string; value: string }[] };
+    if (data.flags && Array.isArray(data.flags)) {
+      return data.flags
+        .map((f) => ({ name: f.name, value: String(f.value ?? "") }))
+        .sort((a, b) => a.name.localeCompare(b.name));
+    }
+  } catch {
+    // not valid JSON
+  }
+  return null;
+}
+
+function parseVarzRaw(raw: string): VarzFlag[] {
+  const flags: VarzFlag[] = [];
+  for (const line of raw.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("--")) continue;
+    const clean = trimmed.replace(/^--/, "");
+    const eqIdx = clean.indexOf("=");
+    if (eqIdx > 0) {
+      flags.push({ name: clean.substring(0, eqIdx), value: clean.substring(eqIdx + 1) });
+    }
+  }
+  return flags.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/**
+ * Fetches the full list of GFlags from a running cluster node.
+ * Strategy:
+ *  1. Try the local proxy (http://localhost:15080/proxy/container:port/...)
+ *  2. Fall back to docker exec curl using the container hostname
+ *     (YugabyteDB binds to the hostname, not localhost)
+ */
+export async function fetchVarzFlags(
+  clusterName: string,
+  serverType: "master" | "tserver",
+): Promise<VarzFlag[]> {
+  const container = `yb-${clusterName}-node1`;
+  const port = serverType === "master" ? 7000 : 9000;
+  const PROXY_PORT = 15080;
+
+  // --- Strategy 1: via the local proxy ---
+  try {
+    const proxyUrl = `http://localhost:${PROXY_PORT}/proxy/${container}:${port}/api/v1/varz`;
+    const res = await fetch(proxyUrl, { signal: AbortSignal.timeout(5000) });
+    if (res.ok) {
+      const text = await res.text();
+      const parsed = parseVarzJson(text);
+      if (parsed) return parsed;
+    }
+  } catch {
+    // proxy not running or unreachable — fall through
+  }
+
+  // Proxy fallback: /varz?raw
+  try {
+    const rawUrl = `http://localhost:${PROXY_PORT}/proxy/${container}:${port}/varz?raw`;
+    const res = await fetch(rawUrl, { signal: AbortSignal.timeout(5000) });
+    if (res.ok) {
+      const text = await res.text();
+      const flags = parseVarzRaw(text);
+      if (flags.length > 0) return flags;
+    }
+  } catch {
+    // fall through to docker exec
+  }
+
+  // --- Strategy 2: docker exec with container hostname (not localhost) ---
+  try {
+    const { stdout } = await executeDockerCommand(
+      `docker exec ${container} curl -sS 'http://${container}:${port}/api/v1/varz'`,
+    );
+    const parsed = parseVarzJson(stdout);
+    if (parsed) return parsed;
+  } catch {
+    // fall through to raw
+  }
+
+  const { stdout } = await executeDockerCommand(
+    `docker exec ${container} curl -sS 'http://${container}:${port}/varz?raw'`,
+  );
+  return parseVarzRaw(stdout);
 }
 
 // ---------------------------------------------------------------------------

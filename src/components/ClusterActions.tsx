@@ -3,6 +3,8 @@ import { ClusterInfo } from "../types";
 import { openInTerminal } from "../utils/terminal";
 import { ScaleClusterForm } from "./ScaleClusterForm";
 import { SetGFlagsForm } from "./SetGFlagsForm";
+import { UpdateGFlagsForm } from "./UpdateGFlagsForm";
+import { RemoveGFlagsForm } from "./RemoveGFlagsForm";
 
 interface ClusterActionsProps {
   cluster: ClusterInfo;
@@ -171,6 +173,18 @@ export function ClusterActions({
             title="Set GFlags"
             onAction={() => onPush(<SetGFlagsForm cluster={cluster} />)}
             shortcut={{ modifiers: ["cmd"], key: "g" }}
+          />
+          <Action
+            icon={Icon.Pencil}
+            title="Update GFlags"
+            onAction={() => onPush(<UpdateGFlagsForm cluster={cluster} />)}
+            shortcut={{ modifiers: ["cmd", "shift"], key: "u" }}
+          />
+          <Action
+            icon={Icon.Eraser}
+            title="Remove GFlags"
+            onAction={() => onPush(<RemoveGFlagsForm cluster={cluster} />)}
+            shortcut={{ modifiers: ["cmd", "shift"], key: "g" }}
           />
         </ActionPanel.Section>
       )}

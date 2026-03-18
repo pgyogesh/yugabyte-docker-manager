@@ -3,6 +3,8 @@ import {
   setGFlagRuntime,
   restartClusterWithFlags,
   updateClusterGFlags,
+  removeClusterGFlags,
+  restartClusterWithoutFlag,
 } from "../utils/docker";
 
 export function useGFlags() {
@@ -86,5 +88,69 @@ export function useGFlags() {
     }
   }
 
-  return { setFlagsRuntime, setFlagsWithRestart };
+  async function removeFlagsFromMetadata(
+    clusterName: string,
+    serverType: "master" | "tserver" | "both",
+    flagNames: string[],
+  ) {
+    try {
+      const label = serverType === "both" ? "masters & tservers" : `${serverType}s`;
+      const flagList = flagNames.join(", ");
+      await showToast({
+        style: Toast.Style.Animated,
+        title: "Removing GFlags",
+        message: `Removing ${flagList} from ${label}...`,
+      });
+
+      const types: ("master" | "tserver")[] =
+        serverType === "both" ? ["master", "tserver"] : [serverType];
+      for (const type of types) {
+        await removeClusterGFlags(clusterName, type, flagNames);
+      }
+
+      await showToast({
+        style: Toast.Style.Success,
+        title: "GFlags Removed",
+        message: `${flagList} removed from ${label} (takes effect on restart)`,
+      });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Unknown error";
+      await showToast({ style: Toast.Style.Failure, title: "Failed to Remove GFlags", message: msg });
+      throw err;
+    }
+  }
+
+  async function removeFlagsWithRestart(
+    clusterName: string,
+    serverType: "master" | "tserver" | "both",
+    flagNames: string[],
+  ) {
+    try {
+      await showToast({
+        style: Toast.Style.Animated,
+        title: "Cluster Restart",
+        message: "Stopping cluster, removing flags, restarting...",
+      });
+
+      await restartClusterWithoutFlag(clusterName, serverType, flagNames, (progress) => {
+        showToast({
+          style: Toast.Style.Animated,
+          title: "Cluster Restart",
+          message: progress.message,
+        });
+      });
+
+      await showToast({
+        style: Toast.Style.Success,
+        title: "Cluster Restarted",
+        message: `Flags removed and cluster restarted`,
+      });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Unknown error";
+      await showToast({ style: Toast.Style.Failure, title: "Cluster Restart Failed", message: msg });
+      throw err;
+    }
+  }
+
+  return { setFlagsRuntime, setFlagsWithRestart, removeFlagsFromMetadata, removeFlagsWithRestart };
 }

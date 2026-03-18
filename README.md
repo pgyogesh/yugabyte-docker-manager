@@ -84,29 +84,78 @@ The extension exposes tools that Raycast AI can use to interact with your cluste
 | **Run Ysqlsh Query** | Run SQL queries or `\d`-style meta-commands |
 | **Run Yb-Ts-Cli Command** | Tablet server diagnostics (list tablets, server readiness, etc.) |
 
-## Setting GFlags
+## Managing GFlags
 
-You can modify YB-Master and YB-TServer GFlags on a running cluster from the **Manage Clusters** command. Select a cluster, then choose **Set GFlags** (`⌘G`) from the action panel.
+You can manage YB-Master and YB-TServer GFlags from the **Manage Clusters** command. Select a cluster and use the actions in the **Cluster Management** section of the action panel:
 
-### Options
+| Action | Shortcut | Description |
+|---|---|---|
+| **Set GFlags** | `⌘G` | Add a new flag or overwrite an existing one |
+| **Update GFlags** | `⇧⌘U` | Edit the value of an existing flag (pre-fills current value) |
+| **Remove GFlags** | `⇧⌘G` | Remove one or more flags |
+
+### Create with GFlags
+
+When creating a cluster, you can specify GFlags in the **Master GFlags** and **TServer GFlags** text areas. Enter **one flag per line** in `name=value` format:
+
+```
+ysql_max_connections=400
+pg_yb_session_timeout_ms=1200000
+ysql_pg_conf_csv="shared_preload_libraries=passwordcheck,auto_explain",pgaudit.log=ROLE
+```
+
+Because each flag is on its own line, commas in a value (like `ysql_pg_conf_csv` above) are never confused with flag separators. No special escaping or `{}` wrapping is needed.
+
+### Set / Update GFlags
+
+Both **Set** and **Update** accept a flag name and value, along with:
 
 | Field | Description |
 |---|---|
 | **Server Type** | Both (Master & TServer), YB-Master, or YB-TServer |
-| **Flag Name** | The GFlag name (e.g. `emergency_repair_mode`) |
-| **Flag Value** | The value to set (e.g. `true`) |
 | **Mode** | Runtime (no restart) or Cluster Restart |
 
-### Runtime mode
+**Runtime mode** applies the flag immediately on all nodes using `yb-ts-cli set_flag --force` without downtime. The flag is also saved to the cluster configuration so it persists on subsequent restarts.
 
-Applies the flag immediately on all nodes using `yb-ts-cli set_flag --force` without any downtime. The flag is also saved to the cluster configuration so it persists in subsequent restarts.
+**Cluster Restart mode** stops all nodes, writes the updated flag into each node's `yugabyted.conf`, then starts all nodes back. This is required for flags that don't support runtime changes (e.g. `ysql_pg_conf_csv`).
 
-- Masters: `yb-ts-cli --server_address <node>:7100 set_flag --force <flag> <value>`
-- TServers: `yb-ts-cli --server_address <node>:9100 set_flag --force <flag> <value>`
+### Remove GFlags
 
-### Cluster Restart mode
+Select one or more flags to remove. Choose **Cluster Restart** mode to stop the cluster, remove the flags from `yugabyted.conf`, and restart — guaranteeing the flags are fully cleared. **Remove from Metadata Only** removes the flags from stored configuration without restarting; they take effect on the next restart.
 
-Stops all nodes, writes the updated flag into each node's `yugabyted.conf` (located in the host-mounted data volume), then starts all nodes back. On startup `yugabyted` reads the conf file and applies the new flags automatically. After all nodes are started the extension waits for `list_all_tablet_servers` to confirm the cluster is healthy.
+### Complex flags with commas
+
+Flags like `ysql_pg_conf_csv` and `ysql_hba_conf_csv` take comma-separated PostgreSQL configuration values. The tool handles these automatically — just enter the raw value without any shell escaping.
+
+#### In the creation form (text area)
+
+Each flag is on its own line, so commas in the value are unambiguous:
+
+```
+ysql_pg_conf_csv="shared_preload_libraries=passwordcheck,auto_explain",pgaudit.log=ROLE
+ysql_max_connections=400
+```
+
+No `{}` wrapping or `\"` escaping is needed.
+
+#### In Set / Update GFlags forms
+
+Enter the flag name and value in their separate fields:
+
+- **Flag Name:** `ysql_pg_conf_csv`
+- **Flag Value:** `"shared_preload_libraries=passwordcheck,auto_explain",pgaudit.log=ROLE`
+
+> **Important:** Do **not** escape quotes with backslashes (`\"`). Enter the value exactly as you would pass it to `--ysql_pg_conf_csv` directly. The tool handles all shell escaping automatically.
+
+#### What happens under the hood
+
+The tool automatically wraps values containing commas in `{}` when passing them to yugabyted's `--tserver_flags` / `--master_flags`. For example, the above value produces:
+
+```
+--tserver_flags="ysql_pg_conf_csv={\"shared_preload_libraries=passwordcheck,auto_explain\",pgaudit.log=ROLE}"
+```
+
+This is the [documented yugabyted convention](https://docs.yugabyte.com/stable/reference/configuration/yugabyted/) for CSV-value flags.
 
 ## Configuration
 
