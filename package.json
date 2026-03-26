@@ -58,6 +58,11 @@
   ],
   "tools": [
     {
+      "name": "create-cluster",
+      "title": "Create Cluster",
+      "description": "Create a new YugabyteDB cluster with Docker containers, specifying name, node count, version, and optional GFlags"
+    },
+    {
       "name": "get-clusters",
       "title": "Get Clusters",
       "description": "Get a list of all YugabyteDB clusters with their status, version, and node count"
@@ -86,6 +91,11 @@
       "name": "run-yb-ts-cli",
       "title": "Run Yb-Ts-Cli Command",
       "description": "Run a yb-ts-cli command on a YugabyteDB tablet server node for diagnostics like listing tablets, checking server readiness, hybrid time, and intent counts"
+    },
+    {
+      "name": "run-yugabyted",
+      "title": "Run Yugabyted Command",
+      "description": "Run a yugabyted command inside a YugabyteDB cluster node for status, log collection, data placement configuration, and certificate management"
     }
   ],
   "ai": {

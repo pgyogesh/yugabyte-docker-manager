@@ -8,6 +8,15 @@ export type { NodePorts, ClusterInfo, ClusterCreationProgress, ProgressCallback,
 const execAsync = promisify(exec);
 
 const CLUSTER_STORAGE_FILE = `${process.env.HOME}/.yugabyte-clusters.json`;
+const SHARED_NETWORK = "yb-shared-network";
+
+async function ensureSharedNetwork(): Promise<void> {
+  try {
+    await execAsync(`docker network inspect ${SHARED_NETWORK} >/dev/null 2>&1`);
+  } catch {
+    await executeDockerCommand(`docker network create ${SHARED_NETWORK} 2>&1`);
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Cluster storage (JSON file)
@@ -441,6 +450,7 @@ async function createYugabytedCluster(
 
   onProgress?.({ stage: "network", message: `Creating network: ${networkName}...` });
   await executeDockerCommand(`docker network create ${networkName} 2>&1`);
+  await ensureSharedNetwork();
 
   const firstNodeName = `yb-${name}-node1`;
 
@@ -501,6 +511,7 @@ async function createYugabytedCluster(
       bin/yugabyted start ${yugabytedArgs}`;
 
     await executeDockerCommand(cmd);
+    await executeDockerCommand(`docker network connect ${SHARED_NETWORK} ${nodeName}`);
     createdContainers.push(nodeName);
 
     onProgress?.({
@@ -565,8 +576,14 @@ async function getClusterContainers(name: string): Promise<string[]> {
 
 export async function startCluster(name: string): Promise<void> {
   const containers = await getClusterContainers(name);
+  await ensureSharedNetwork();
   for (const container of containers) {
     await executeDockerCommand(`docker start ${container} 2>/dev/null || true`);
+    try {
+      await execAsync(`docker network connect ${SHARED_NETWORK} ${container} 2>/dev/null`);
+    } catch {
+      /* already connected */
+    }
   }
   await updateClusterStatus(name, "running");
 }
@@ -663,6 +680,8 @@ async function scaleUp(cluster: ClusterInfo, targetNodes: number, onProgress?: P
       bin/yugabyted start ${yugabytedArgs}`;
 
     await executeDockerCommand(cmd);
+    await ensureSharedNetwork();
+    await executeDockerCommand(`docker network connect ${SHARED_NETWORK} ${nodeName}`);
     await new Promise((resolve) => setTimeout(resolve, 5000));
     await verifyContainerRunning(nodeName);
 
@@ -720,6 +739,18 @@ export async function deleteClusterContainers(name: string): Promise<void> {
     await executeDockerCommand(`docker rm -f ${container} 2>/dev/null || true`);
   }
   await executeDockerCommand(`docker network rm yb-${name}-network 2>/dev/null || true`);
+
+  // Remove shared network if no containers remain on it
+  try {
+    const { stdout } = await execAsync(
+      `docker network inspect ${SHARED_NETWORK} --format '{{range .Containers}}{{.Name}} {{end}}' 2>/dev/null`,
+    );
+    if (!stdout.trim()) {
+      await execAsync(`docker network rm ${SHARED_NETWORK} 2>/dev/null || true`);
+    }
+  } catch {
+    /* shared network doesn't exist or already removed */
+  }
 
   // Delete data directory
   try {

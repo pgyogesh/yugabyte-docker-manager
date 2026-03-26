@@ -19,6 +19,8 @@ instructions: |
   1. The docker exec command (e.g. docker exec -it yb-my-cluster-node1 bin/ysqlsh -h yb-my-cluster-node1)
   2. The localhost alternative (e.g. psql -h localhost -p 5433 -U yugabyte)
 
+  Use create-cluster when the user asks to create, spin up, or provision a new YugabyteDB cluster. Specify a name, node count (default 3), and version (default "latest"). All clusters automatically share a Docker network so containers from different clusters can communicate (e.g. for xCluster replication). If the user asks to create multiple clusters (e.g. "source" and "target"), create them sequentially.
+
   Always use the get-clusters tool first to see which clusters exist before answering cluster-specific questions.
   Use get-cluster-details when you need ports, GFlags, or connection strings for a specific cluster.
   Use get-cluster-services when the user asks about running processes or service health.
@@ -62,9 +64,19 @@ instructions: |
   - "list_maintenance_windows" - show active maintenance windows
   You can optionally specify a nodeNumber to target a specific node (defaults to node 1).
 
+  Use run-yugabyted for node-level management commands. This runs yugabyted inside a cluster container. You can optionally specify a nodeNumber to target a specific node (defaults to node 1). Common sub-commands:
+  - "status" - show overall node status including master, tserver, and UI URLs
+  - "status --master" - show master process status and PID
+  - "status --tserver" - show tserver process status and PID
+  - "collect_logs" - collect and package logs for troubleshooting
+  - "configure data_placement --fault_tolerance zone" - configure data placement policy
+  - "cert list" - list TLS certificates
+  - "cert generate_server_certs" - generate server TLS certificates
+
   Use run-yb-admin whenever the user asks about masters, tablet servers, tablets, load balancing, replication, table details, or any cluster-level administration that needs live data.
   Use run-ysqlsh whenever the user asks about database contents, schema, table data, running queries, or wants to execute SQL.
   Use run-yb-ts-cli whenever the user asks about tablet-level details on a specific node, transaction intents, hybrid timestamps, or tserver readiness.
+  Use run-yugabyted whenever the user asks about node status, process status, log collection, data placement configuration, or certificate management.
 
 evals:
   - input: "@yugabyte-docker-manager What clusters do I have?"
@@ -176,3 +188,55 @@ evals:
           arguments:
             subcommand:
               includes: "count_intents"
+
+  - input: "@yugabyte-docker-manager What's the status of my-cluster?"
+    expected:
+      - callsTool:
+          name: run-yugabyted
+          arguments:
+            subcommand:
+              includes: "status"
+
+  - input: "@yugabyte-docker-manager Is the master process running on node 2 of my-cluster?"
+    expected:
+      - callsTool:
+          name: run-yugabyted
+          arguments:
+            subcommand:
+              includes: "status"
+
+  - input: "@yugabyte-docker-manager Collect logs from my-cluster"
+    expected:
+      - callsTool:
+          name: run-yugabyted
+          arguments:
+            subcommand:
+              includes: "collect_logs"
+
+  - input: "@yugabyte-docker-manager What certificates does my-cluster have?"
+    expected:
+      - callsTool:
+          name: run-yugabyted
+          arguments:
+            subcommand:
+              includes: "cert"
+
+  - input: "@yugabyte-docker-manager Create a 3-node cluster called test-db"
+    expected:
+      - callsTool:
+          name: create-cluster
+          arguments:
+            name:
+              includes: "test-db"
+
+  - input: "@yugabyte-docker-manager Spin up a source and target cluster for xCluster replication"
+    expected:
+      - callsTool:
+          name: create-cluster
+
+  - input: "@yugabyte-docker-manager Create a single-node cluster with version 2024.2.3.0-b37"
+    expected:
+      - callsTool:
+          name: create-cluster
+          arguments:
+            nodes: 1
