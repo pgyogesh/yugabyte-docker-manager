@@ -122,6 +122,22 @@ export function ClusterListItem({
                 ) : (
                   <List.Item.Detail.Metadata.Label title="Ports" text="Not available" />
                 )}
+                {cluster.placement && (
+                  <>
+                    <List.Item.Detail.Metadata.Separator />
+                    <List.Item.Detail.Metadata.Label title="Cloud" text={cluster.placement.cloud} icon={Icon.Cloud} />
+                    <List.Item.Detail.Metadata.Label
+                      title="Zones"
+                      text={cluster.placement.zones.map((z) => z.zone).join(", ")}
+                      icon={Icon.Pin}
+                    />
+                    <List.Item.Detail.Metadata.Label
+                      title="Fault Tolerance"
+                      text={cluster.placement.faultTolerance}
+                      icon={Icon.Shield}
+                    />
+                  </>
+                )}
                 {cluster.masterGFlags && (
                   <>
                     <List.Item.Detail.Metadata.Separator />

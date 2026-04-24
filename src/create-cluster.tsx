@@ -1,9 +1,19 @@
 import { Action, ActionPanel, Form, showToast, Toast, Icon, launchCommand, LaunchType } from "@raycast/api";
 import { useForm } from "@raycast/utils";
-import { useRef } from "react";
+import { useMemo, useRef, useState } from "react";
 import { createYugabyteCluster } from "./utils/docker";
 import { useDockerHubReleases } from "./hooks/useDockerHubReleases";
-import { ProgressCallback } from "./types";
+import { ProgressCallback, ClusterPlacement } from "./types";
+import {
+  CLOUDS,
+  Cloud,
+  FaultTolerance,
+  FAULT_TOLERANCE_OPTIONS,
+  PLACEMENT_CATALOG,
+  decodeZone,
+  encodeZone,
+  minimumZonesFor,
+} from "./utils/placement";
 
 interface CreateClusterValues {
   name: string;
@@ -13,21 +23,84 @@ interface CreateClusterValues {
   tserverGFlags: string;
 }
 
+const DEFAULT_CLOUD: Cloud = "aws";
+const DEFAULT_FT: FaultTolerance = "zone";
+const DEFAULT_ZONES = PLACEMENT_CATALOG[DEFAULT_CLOUD].filter((z) => z.region === "us-west-1").map(encodeZone);
+
 export default function Command() {
   const { releases, isLoading: isLoadingReleases, revalidate: refreshReleases } = useDockerHubReleases();
   const toastRef = useRef<Toast | null>(null);
   const isSubmittingRef = useRef(false);
 
+  const [cloud, setCloud] = useState<Cloud>(DEFAULT_CLOUD);
+  const [selectedZones, setSelectedZones] = useState<string[]>(DEFAULT_ZONES);
+  const [faultTolerance, setFaultTolerance] = useState<FaultTolerance>(DEFAULT_FT);
+
+  const availableZones = useMemo(() => PLACEMENT_CATALOG[cloud], [cloud]);
+
+  const handleCloudChange = (value: string) => {
+    const next = value as Cloud;
+    setCloud(next);
+    setSelectedZones((prev) => {
+      const validTokens = new Set(PLACEMENT_CATALOG[next].map(encodeZone));
+      const retained = prev.filter((t) => validTokens.has(t));
+      if (retained.length > 0) return retained;
+      return PLACEMENT_CATALOG[next].slice(0, 3).map(encodeZone);
+    });
+  };
+
   const { handleSubmit, itemProps } = useForm<CreateClusterValues>({
     async onSubmit(values) {
       if (isSubmittingRef.current) return;
-      isSubmittingRef.current = true;
 
       const name = values.name.trim();
       const nodes = parseInt(values.nodes, 10);
       const version = values.version.trim() || "latest";
       const masterGFlags = values.masterGFlags?.trim() || undefined;
       const tserverGFlags = values.tserverGFlags?.trim() || undefined;
+
+      const decodedZones = selectedZones
+        .map(decodeZone)
+        .filter((z): z is { region: string; zone: string } => z !== null);
+
+      if (decodedZones.length === 0) {
+        await showToast({
+          style: Toast.Style.Failure,
+          title: "Select at least one zone",
+          message: `Pick one or more zones from the ${cloud.toUpperCase()} catalog`,
+        });
+        return;
+      }
+
+      const minZones = minimumZonesFor(faultTolerance);
+      if (decodedZones.length < minZones) {
+        await showToast({
+          style: Toast.Style.Failure,
+          title: `Fault tolerance "${faultTolerance}" needs ${minZones}+ zones`,
+          message: `Currently ${decodedZones.length} selected. Add more zones or set Fault Tolerance to None.`,
+        });
+        return;
+      }
+
+      if (faultTolerance === "region") {
+        const distinctRegions = new Set(decodedZones.map((z) => z.region));
+        if (distinctRegions.size < 3) {
+          await showToast({
+            style: Toast.Style.Failure,
+            title: "Region-level FT needs 3+ distinct regions",
+            message: `Currently ${distinctRegions.size} region(s) across selected zones.`,
+          });
+          return;
+        }
+      }
+
+      const placement: ClusterPlacement = {
+        cloud,
+        zones: decodedZones,
+        faultTolerance,
+      };
+
+      isSubmittingRef.current = true;
 
       const initialToast = await showToast({
         style: Toast.Style.Animated,
@@ -43,6 +116,7 @@ export default function Command() {
           network: "Setting Up Network",
           node: `Creating Node ${progress.nodeNumber ?? ""}/${progress.totalNodes ?? ""}`,
           init: "Initializing Cluster",
+          placement: "Configuring Data Placement",
           finalize: "Finalizing",
           complete: "Cluster Created",
         };
@@ -55,7 +129,7 @@ export default function Command() {
       };
 
       try {
-        await createYugabyteCluster(name, nodes, version, masterGFlags, tserverGFlags, progressCallback);
+        await createYugabyteCluster(name, nodes, version, masterGFlags, tserverGFlags, progressCallback, placement);
 
         toastRef.current?.hide();
         await showToast({
@@ -142,6 +216,45 @@ export default function Command() {
       >
         {releases.map((release) => (
           <Form.Dropdown.Item key={release.tag} value={release.tag} title={release.name} />
+        ))}
+      </Form.Dropdown>
+      <Form.Separator />
+      <Form.Description
+        title="Placement"
+        text="YBA-style dummy cloud/region/zone selector. Selected zones are distributed round-robin across nodes via --cloud_location."
+      />
+      <Form.Dropdown
+        id="cloud"
+        title="Cloud Provider"
+        value={cloud}
+        onChange={handleCloudChange}
+        info="Dummy cloud — values are cosmetic and passed to yugabyted as --cloud_location=<cloud>.<region>.<zone>."
+      >
+        {CLOUDS.map((c) => (
+          <Form.Dropdown.Item key={c.value} value={c.value} title={c.label} />
+        ))}
+      </Form.Dropdown>
+      <Form.TagPicker
+        id="zones"
+        title="Zones"
+        value={selectedZones}
+        onChange={setSelectedZones}
+        info="Pick one or more zones from the selected cloud. Nodes are distributed round-robin across zones (node i → zones[i % zones.length])."
+      >
+        {availableZones.map((z) => {
+          const token = encodeZone(z);
+          return <Form.TagPicker.Item key={token} value={token} title={`${z.region} / ${z.zone}`} />;
+        })}
+      </Form.TagPicker>
+      <Form.Dropdown
+        id="faultTolerance"
+        title="Fault Tolerance"
+        value={faultTolerance}
+        onChange={(v) => setFaultTolerance(v as FaultTolerance)}
+        info="Applied via `yugabyted configure data_placement --fault_tolerance=<level>` after the cluster is up. Zone/region/cloud FT require 3+ distinct zones."
+      >
+        {FAULT_TOLERANCE_OPTIONS.map((ft) => (
+          <Form.Dropdown.Item key={ft.value} value={ft.value} title={ft.label} />
         ))}
       </Form.Dropdown>
       <Form.Separator />

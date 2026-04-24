@@ -8,6 +8,18 @@ export interface NodePorts {
   ycql: number;
 }
 
+export interface NodePlacement {
+  cloud: string;
+  region: string;
+  zone: string;
+}
+
+export interface ClusterPlacement {
+  cloud: string;
+  zones: { region: string; zone: string }[];
+  faultTolerance: "none" | "zone" | "region" | "cloud";
+}
+
 export interface ClusterInfo {
   name: string;
   nodes: number;
@@ -16,6 +28,8 @@ export interface ClusterInfo {
   masterGFlags?: string;
   tserverGFlags?: string;
   nodePorts?: NodePorts[];
+  placement?: ClusterPlacement;
+  nodePlacements?: NodePlacement[];
 }
 
 export interface ClusterCreationProgress {

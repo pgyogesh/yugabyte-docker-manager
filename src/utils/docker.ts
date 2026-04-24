@@ -1,9 +1,26 @@
 import { exec } from "child_process";
 import { promisify } from "util";
-import { NodePorts, ClusterInfo, ClusterCreationProgress, ProgressCallback, ClusterService } from "../types";
+import {
+  NodePorts,
+  ClusterInfo,
+  ClusterCreationProgress,
+  ProgressCallback,
+  ClusterService,
+  ClusterPlacement,
+  NodePlacement,
+} from "../types";
+import { distributeNodes } from "./placement";
 
 // Re-export types so existing consumers don't break
-export type { NodePorts, ClusterInfo, ClusterCreationProgress, ProgressCallback, ClusterService };
+export type {
+  NodePorts,
+  ClusterInfo,
+  ClusterCreationProgress,
+  ProgressCallback,
+  ClusterService,
+  ClusterPlacement,
+  NodePlacement,
+};
 
 const execAsync = promisify(exec);
 
@@ -199,9 +216,13 @@ export async function createYugabyteCluster(
   masterGFlags?: string,
   tserverGFlags?: string,
   onProgress?: ProgressCallback,
+  placement?: ClusterPlacement,
 ): Promise<void> {
   onProgress?.({ stage: "checking", message: "Finding available ports..." });
   const nodePorts = await findAvailablePortsForNodes(nodes);
+
+  const nodePlacements: NodePlacement[] | undefined =
+    placement && placement.zones.length > 0 ? distributeNodes(nodes, placement.zones, placement.cloud) : undefined;
 
   // Clean up existing containers with the same name pattern
   onProgress?.({ stage: "cleanup", message: "Cleaning up existing containers..." });
@@ -247,6 +268,7 @@ export async function createYugabyteCluster(
       tserverGFlags,
       onProgress,
       nodePorts,
+      nodePlacements,
     );
   } catch (error) {
     // Rollback
@@ -268,11 +290,40 @@ export async function createYugabyteCluster(
   onProgress?.({ stage: "finalize", message: "Finalizing cluster formation..." });
   await new Promise((resolve) => setTimeout(resolve, 5000));
 
+  if (placement && placement.faultTolerance !== "none") {
+    onProgress?.({
+      stage: "placement",
+      message: `Configuring data placement (fault_tolerance=${placement.faultTolerance})...`,
+    });
+    try {
+      await executeDockerCommand(
+        `docker exec yb-${name}-node1 /home/yugabyte/bin/yugabyted configure data_placement --fault_tolerance=${placement.faultTolerance} --base_dir=/home/yugabyte/yb_data`,
+      );
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Unknown error";
+      console.warn(`[Placement] configure data_placement failed (non-fatal): ${msg.substring(0, 300)}`);
+      onProgress?.({
+        stage: "placement",
+        message: `Data placement config failed (non-fatal): ${msg.substring(0, 120)}`,
+      });
+    }
+  }
+
   onProgress?.({ stage: "complete", message: "Cluster created successfully!" });
 
   const normalizedMaster = normalizeGFlagsForStorage(masterGFlags);
   const normalizedTserver = normalizeGFlagsForStorage(tserverGFlags);
-  await saveCluster({ name, nodes, version, status: "running", masterGFlags: normalizedMaster, tserverGFlags: normalizedTserver, nodePorts });
+  await saveCluster({
+    name,
+    nodes,
+    version,
+    status: "running",
+    masterGFlags: normalizedMaster,
+    tserverGFlags: normalizedTserver,
+    nodePorts,
+    placement,
+    nodePlacements,
+  });
 }
 
 async function ensureImage(version: string, onProgress?: ProgressCallback): Promise<void> {
@@ -439,6 +490,7 @@ async function createYugabytedCluster(
   tserverGFlags?: string,
   onProgress?: ProgressCallback,
   nodePorts?: NodePorts[],
+  nodePlacements?: NodePlacement[],
 ): Promise<void> {
   const networkName = `yb-${name}-network`;
 
@@ -479,6 +531,11 @@ async function createYugabytedCluster(
     // Build yugabyted args
     let yugabytedArgs = `--base_dir=${containerDataDir} --background=false`;
     if (i > 0) yugabytedArgs += ` --join=${firstNodeName}`;
+
+    const placement = nodePlacements?.[i];
+    if (placement) {
+      yugabytedArgs += ` --cloud_location=${placement.cloud}.${placement.region}.${placement.zone}`;
+    }
 
     if (masterGFlags?.trim()) {
       const escaped = processGFlags(masterGFlags).replace(/"/g, '\\"');
@@ -632,6 +689,21 @@ async function scaleUp(cluster: ClusterInfo, targetNodes: number, onProgress?: P
     claimedPorts.add(ports.ycql);
   }
 
+  // Continue round-robin placement for the new nodes so they stay aligned with
+  // the cluster's declared topology.
+  const newNodePlacements: NodePlacement[] = [];
+  if (cluster.placement && cluster.placement.zones.length > 0) {
+    for (let i = 0; i < nodesToAdd; i++) {
+      const globalIndex = lastNodeNumber + i;
+      const zone = cluster.placement.zones[globalIndex % cluster.placement.zones.length];
+      newNodePlacements.push({
+        cloud: cluster.placement.cloud,
+        region: zone.region,
+        zone: zone.zone,
+      });
+    }
+  }
+
   for (let i = 0; i < nodesToAdd; i++) {
     const nodeNumber = lastNodeNumber + i + 1;
     const nodeName = `yb-${cluster.name}-node${nodeNumber}`;
@@ -651,6 +723,10 @@ async function scaleUp(cluster: ClusterInfo, targetNodes: number, onProgress?: P
     });
 
     let yugabytedArgs = `--base_dir=${containerDataDir} --background=false --join=${firstNodeName}`;
+    const placement = newNodePlacements[i];
+    if (placement) {
+      yugabytedArgs += ` --cloud_location=${placement.cloud}.${placement.region}.${placement.zone}`;
+    }
     if (cluster.masterGFlags?.trim()) {
       const escaped = processGFlags(cluster.masterGFlags).replace(/"/g, '\\"');
       yugabytedArgs += ` --master_flags="${escaped}"`;
@@ -691,7 +767,14 @@ async function scaleUp(cluster: ClusterInfo, targetNodes: number, onProgress?: P
   }
 
   const updatedNodePorts = cluster.nodePorts ? [...cluster.nodePorts, ...newNodePorts] : newNodePorts;
-  await saveCluster({ ...cluster, nodes: targetNodes, nodePorts: updatedNodePorts });
+  const updatedNodePlacements =
+    newNodePlacements.length > 0 ? [...(cluster.nodePlacements ?? []), ...newNodePlacements] : cluster.nodePlacements;
+  await saveCluster({
+    ...cluster,
+    nodes: targetNodes,
+    nodePorts: updatedNodePorts,
+    nodePlacements: updatedNodePlacements,
+  });
   onProgress?.({ stage: "complete", message: `Successfully scaled cluster to ${targetNodes} nodes` });
 }
 
@@ -729,7 +812,13 @@ async function scaleDown(cluster: ClusterInfo, targetNodes: number, onProgress?:
   }
 
   const updatedNodePorts = cluster.nodePorts?.slice(0, targetNodes);
-  await saveCluster({ ...cluster, nodes: targetNodes, nodePorts: updatedNodePorts });
+  const updatedNodePlacements = cluster.nodePlacements?.slice(0, targetNodes);
+  await saveCluster({
+    ...cluster,
+    nodes: targetNodes,
+    nodePorts: updatedNodePorts,
+    nodePlacements: updatedNodePlacements,
+  });
   onProgress?.({ stage: "complete", message: `Successfully scaled cluster to ${targetNodes} nodes` });
 }
 
@@ -937,9 +1026,7 @@ export async function updateClusterGFlags(
   const cluster = await getCluster(clusterName);
   if (!cluster) throw new Error(`Cluster "${clusterName}" not found`);
 
-  const existing = parseGFlagsToMap(
-    serverType === "master" ? cluster.masterGFlags : cluster.tserverGFlags,
-  );
+  const existing = parseGFlagsToMap(serverType === "master" ? cluster.masterGFlags : cluster.tserverGFlags);
   for (const [key, value] of Object.entries(flags)) {
     existing[key] = value;
   }
@@ -962,9 +1049,7 @@ export async function removeClusterGFlags(
   const cluster = await getCluster(clusterName);
   if (!cluster) throw new Error(`Cluster "${clusterName}" not found`);
 
-  const existing = parseGFlagsToMap(
-    serverType === "master" ? cluster.masterGFlags : cluster.tserverGFlags,
-  );
+  const existing = parseGFlagsToMap(serverType === "master" ? cluster.masterGFlags : cluster.tserverGFlags);
   for (const name of flagNames) {
     delete existing[name];
   }
@@ -988,13 +1073,10 @@ export async function restartClusterWithoutFlag(
   const cluster = await getCluster(clusterName);
   if (!cluster) throw new Error(`Cluster "${clusterName}" not found`);
 
-  const types: ("master" | "tserver")[] =
-    serverType === "both" ? ["master", "tserver"] : [serverType];
+  const types: ("master" | "tserver")[] = serverType === "both" ? ["master", "tserver"] : [serverType];
 
   for (const type of types) {
-    const existing = parseGFlagsToMap(
-      type === "master" ? cluster.masterGFlags : cluster.tserverGFlags,
-    );
+    const existing = parseGFlagsToMap(type === "master" ? cluster.masterGFlags : cluster.tserverGFlags);
     for (const name of flagNames) {
       delete existing[name];
     }
@@ -1033,15 +1115,8 @@ export async function restartClusterWithoutFlag(
  *
  * Throws if the cluster doesn't become ready within the timeout.
  */
-async function waitForClusterReady(
-  clusterName: string,
-  numNodes: number,
-  timeoutMs: number = 180000,
-): Promise<void> {
-  const masterAddresses = Array.from(
-    { length: numNodes },
-    (_, i) => `yb-${clusterName}-node${i + 1}:7100`,
-  ).join(",");
+async function waitForClusterReady(clusterName: string, numNodes: number, timeoutMs: number = 180000): Promise<void> {
+  const masterAddresses = Array.from({ length: numNodes }, (_, i) => `yb-${clusterName}-node${i + 1}:7100`).join(",");
 
   const start = Date.now();
   let lastError = "";
@@ -1052,7 +1127,10 @@ async function waitForClusterReady(
         const { stdout } = await executeDockerCommand(
           `docker exec ${container} /home/yugabyte/bin/yb-admin -master_addresses ${masterAddresses} list_all_masters`,
         );
-        const lines = stdout.trim().split("\n").filter((l) => l.trim());
+        const lines = stdout
+          .trim()
+          .split("\n")
+          .filter((l) => l.trim());
         const aliveCount = lines.filter((l) => l.includes("ALIVE")).length;
         const hasLeader = lines.some((l) => l.includes("LEADER"));
         if (aliveCount >= numNodes && hasLeader) {
@@ -1065,7 +1143,9 @@ async function waitForClusterReady(
     }
     await new Promise((resolve) => setTimeout(resolve, 5000));
   }
-  throw new Error(`Cluster readiness check timed out after ${timeoutMs / 1000}s. Last status: ${lastError.substring(0, 200)}`);
+  throw new Error(
+    `Cluster readiness check timed out after ${timeoutMs / 1000}s. Last status: ${lastError.substring(0, 200)}`,
+  );
 }
 
 // Flags whose values are CSV lists of PostgreSQL settings. When merging
@@ -1173,21 +1253,12 @@ function mergeConfFlags(existingConfStr: string | undefined, ourStoredFlags: str
  * and writes it back. On the next `docker start` yugabyted picks up the
  * updated conf automatically.
  */
-async function updateYugabytedConf(
-  clusterName: string,
-  nodeNumber: number,
-  cluster: ClusterInfo,
-): Promise<void> {
+async function updateYugabytedConf(clusterName: string, nodeNumber: number, cluster: ClusterInfo): Promise<void> {
   const os = await import("os");
   const path = await import("path");
   const fs = await import("fs/promises");
 
-  const confDir = path.join(
-    os.homedir(),
-    `yb_docker_data_${clusterName}`,
-    `node${nodeNumber}`,
-    "conf",
-  );
+  const confDir = path.join(os.homedir(), `yb_docker_data_${clusterName}`, `node${nodeNumber}`, "conf");
   const confPath = path.join(confDir, "yugabyted.conf");
 
   let conf: Record<string, unknown> = {};
@@ -1234,13 +1305,10 @@ export async function restartClusterWithFlags(
   const cluster = await getCluster(clusterName);
   if (!cluster) throw new Error(`Cluster "${clusterName}" not found`);
 
-  const types: ("master" | "tserver")[] =
-    serverType === "both" ? ["master", "tserver"] : [serverType];
+  const types: ("master" | "tserver")[] = serverType === "both" ? ["master", "tserver"] : [serverType];
 
   for (const type of types) {
-    const existing = parseGFlagsToMap(
-      type === "master" ? cluster.masterGFlags : cluster.tserverGFlags,
-    );
+    const existing = parseGFlagsToMap(type === "master" ? cluster.masterGFlags : cluster.tserverGFlags);
     existing[flagName] = flagValue;
     const merged = gflagsMapToString(existing);
     if (type === "master") {
@@ -1312,10 +1380,7 @@ function parseVarzRaw(raw: string): VarzFlag[] {
  *  2. Fall back to docker exec curl using the container hostname
  *     (YugabyteDB binds to the hostname, not localhost)
  */
-export async function fetchVarzFlags(
-  clusterName: string,
-  serverType: "master" | "tserver",
-): Promise<VarzFlag[]> {
+export async function fetchVarzFlags(clusterName: string, serverType: "master" | "tserver"): Promise<VarzFlag[]> {
   const container = `yb-${clusterName}-node1`;
   const port = serverType === "master" ? 7000 : 9000;
   const PROXY_PORT = 15080;
